@@ -58,7 +58,7 @@ jobs:
             ~/.arduino15/staging
             ~/Arduino/libraries
           # Bump the version list here together with the installs below.
-          key: arduino-${{ runner.os }}-esp32-${{ env.ESP32_CORE_VERSION }}-lvgl-8.3.11-gfxarduino-1.6.9-gt911-1.0.2-adagfx-1.12.6-busio-1.17.4-json-7.4.3-pubsub-2.8
+          key: arduino-${{ runner.os }}-esp32-${{ env.ESP32_CORE_VERSION }}-lvgl-8.3.11-gfxarduino-1.6.9-gt911-1.0.2-json-7.4.3-pubsub-2.8
 
       # ------------------------------
       # Arduino CLI
@@ -89,20 +89,12 @@ jobs:
             "lvgl@8.3.11" \
             "GFX Library for Arduino@1.6.9" \
             "TAMC_GT911@1.0.2" \
-            "Adafruit GFX Library@1.12.6" \
-            "Adafruit BusIO@1.17.4" \
             "ArduinoJson@7.4.3" \
             "PubSubClient@2.8"
 
       # LVGL 8 looks for lv_conf.h next to its own library folder.
       - name: Install lv_conf.h
         run: cp ci/lv_conf.h ~/Arduino/libraries/lv_conf.h
-
-      - name: Patch Adafruit_BusIO for ESP32 core 3.x
-        run: |
-          FILE="$HOME/Arduino/libraries/Adafruit_BusIO/Adafruit_SPIDevice.h"
-          sed -i 's/SPI_BITORDER_MSBFIRST = SPI_MSBFIRST/SPI_BITORDER_MSBFIRST = MSBFIRST/' "$FILE"
-          sed -i 's/SPI_BITORDER_LSBFIRST = SPI_LSBFIRST/SPI_BITORDER_LSBFIRST = LSBFIRST/' "$FILE"
 
       # ------------------------------
       # Compile

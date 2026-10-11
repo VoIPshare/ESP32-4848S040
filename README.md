@@ -40,10 +40,11 @@ Dark theme, color-coded status indicators (green/yellow/red), 60 FPS LVGL render
 ### 2. Install Libraries
 
 Sketch → Include Library → Manage Libraries, install:
-- **Arduino_GFX_Library** (by Arduino)
-- **LVGL** (v8.3, by Kisvegry — see [Compatibility](#lvgl-version-compatibility) below)
-- **ArduinoJson** (for API integration)
-- Touch driver as needed (GT911, FT6X36, XPT2046)
+- **GFX Library for Arduino** 1.6.9 (by moononournation)
+- **lvgl** 8.3.11 (see [Compatibility](#lvgl-version-compatibility) below)
+- **TAMC_GT911** 1.0.2 (touch)
+- **ArduinoJson** 7.4.3
+- **PubSubClient** 2.8 (Bambu MQTT)
 
 ### 3. Configure LVGL
 
@@ -77,7 +78,7 @@ Edit `lv_conf.h` and uncomment/set:
 3. If upload fails, hold the **BOOT** button while uploading, release once it starts
 4. Tools → Serial Monitor, baud rate **115200** — you should see `Setup complete!`
 
-The display should light up on the Climate Control screen.
+The display should light up on the Home screen.
 
 ### LVGL Version Compatibility
 
@@ -94,44 +95,19 @@ If you'd rather stay on LVGL 9.5+, you'll need to update the sketch's display-in
 ## Navigation
 
 - **Touch:** swipe left/right to change screen, or tap the top-right corner for the next screen (hold it 5 s for Settings). Hold the bottom-left corner 3 s to lock the current screen.
-- **Buttons (optional):** GPIO 6 → next screen, GPIO 7 → previous screen (wire each to GND, `INPUT_PULLUP`)
-- **Touch (optional):** implement a touch driver and `#include` it in the sketch — not included by default
 
 ## Screens
 
-### Climate Control
-Temperature, humidity, digital clock/date, system status.
+Swipe left/right (or tap the top-right corner) to move between them:
 
-### BambuLab Printer
-Status (Online/Printing/etc.), progress bar, nozzle & bed temps, time remaining.
-
-### Proxmox Cluster
-3 nodes with online/degraded status, CPU %, RAM %, overall cluster health.
-
-### Package Tracking
-3 packages with status (Processing/In Transit/Delivered), estimated dates, carrier.
-
-## Configuration
-
-Edit `config.h` to customize:
-
-```c
-// Colors
-#define COLOR_PRIMARY_RGB 0x00, 0xBC, 0xD4
-
-// WiFi
-#define ENABLE_WIFI
-#define WIFI_SSID "YOUR_SSID"
-#define WIFI_PASSWORD "YOUR_PASSWORD"
-
-// API endpoints
-#define ENABLE_BAMBU_API
-#define BAMBU_PRINTER_IP "192.168.1.100"
-
-// Update intervals (ms)
-#define CLIMATE_UPDATE_INTERVAL 5000
-#define PRINTER_UPDATE_INTERVAL 2000
-```
+1. **Home**: clock, date, current weather (icon, temperature, humidity, wind, UV) and the next calendar event or flight
+2. **Bambu Lab printer**: status, progress, temperatures, layers, AMS trays, fans and HMS warnings
+3. **Calendar**: the current month with event days marked; tap a day for its events
+4. **Proxmox cluster**: up to 3 nodes with status, CPU, RAM, disk and uptime
+5. **Stocks**: up to 7 quotes with daily change
+6. **MakerWorld**: likes, downloads, prints, collections and boosts
+7. **Packages**: up to 5 PKGE parcels with status and estimated delivery
+8. **Flight**: only while a calendar flight is coming up or in progress
 
 ## Setup page
 
@@ -187,46 +163,17 @@ Available GPIO for other uses: 2, 19, 34, 35, 36, 37, 40, 41, 42, 43, 44, 45 (so
 
 ## Development
 
-### Adding a New Screen
-```c
-lv_obj_t *create_my_screen() {
-  lv_obj_t *scr = lv_obj_create(NULL);
-  // ... add widgets
-  return scr;
-}
-```
-Add it to the `screens[]` array in the main sketch and update the navigation loop bounds (4 screens → 5).
+- Each screen lives in its own tab (`bambu.ino`, `calendar.ino`, ...) with a `create_*_screen()` builder and a `*_apply_to_ui()` refresh. To add one, add it to `screens[]` in `setup()` and bump `SCREEN_COUNT`.
+- Network work runs on `network_task` (core 0) and must never call LVGL: write the data under `data_lock()`, set a `*_needs_ui_refresh` flag, and let `loop()` apply it.
+- Set `DEBUG` at the top of `esp32_dashboard.ino` to 0 to silence verbose Serial output.
 
-### Adding a New Sensor
-```c
-// In data_sources.h
-typedef struct { float value; uint32_t timestamp; } MyData;
-void my_sensor_update() { /* read sensor */ }
-```
-Call it from `update_all_data_sources()` in the main loop.
-
-### Debugging
-```c
-#define DEBUG_SERIAL 1   // in config.h
-```
-```c
-DEBUG_PRINTLN("My debug message");
-print_heap_info();   // from utils.h
-```
-
-## Data Flow
+## Data flow
 
 ```
-Data Sources (sensors / cloud APIs, optional WiFi)
-        │
-        ▼
-data_sources.h  — climate_update(), printer_update(), proxmox_update(), vessel_update()
-        │
-        ▼
-LVGL objects  — label text, progress bars, status colors
-        │
-        ▼
-Arduino_GFX  — renders to 480×480 RGB display at 60 FPS
+network_task (core 0)                         loop() (core 1, LVGL)
+  fetch_weather, proxmox_fetch, Bambu MQTT
+  web_fetch.ino -> direct_fetch.cpp      -->  *_needs_ui_refresh flags --> *_apply_to_ui()
+  (stocks, iCal, MakerWorld, PKGE, flight)    data copied in under data_lock()
 ```
 
 ## Performance
@@ -278,25 +225,23 @@ Arduino_GFX  — renders to 480×480 RGB display at 60 FPS
 **Compilation errors**
 - See [LVGL Version Compatibility](#lvgl-version-compatibility) above
 
-**Touch not working**
-- No touch driver ships with this project — implement one (e.g. GT911) separately and `#include` it
+**Touch in the wrong place**
+- Adjust `TOUCH_ROTATION_STEPS` (0-3) at the top of `esp32_dashboard.ino`
 
-**WiFi/API integration not working**
-- Uncomment `#define ENABLE_WIFI` in `config.h` and set credentials
-- Implement the actual HTTP calls in `data_sources.h` (see API_INTEGRATION_GUIDE.md)
+**A screen stays empty or shows "fetch failed"**
+- Check its field on the setup page, and watch the Serial log (115200 baud): each source logs its HTTP result (`[ICS]`, `[Stocks]`, `[MakerWorld]`, `[Tracking]`, `[Flight]`, `[Weather]`)
 
 ## File Structure
 
 ```
 esp32_dashboard/
 ├── esp32_dashboard.ino          ← Main sketch (upload this): display, Home, settings, Wi-Fi portal, network task
-├── bambu.ino / calendar.ino / proxmox.ino / stocks.ino / makerworld.ino / tracking.ino  ← one tab per screen
+├── bambu.ino / calendar.ino / proxmox.ino / stocks.ino / makerworld.ino / tracking.ino / flight.ino  ← one tab per screen
 ├── web_fetch.ino                ← schedules the direct fetches and copies results into the screens
 ├── direct_fetch.cpp/.h          ← Open-Meteo geocoding, Yahoo, iCal parser, MakerWorld, PKGE, AeroDataBox
 ├── calendar_types.h             ← calendar/flight structs shared by the tabs and direct_fetch.cpp
 ├── ci/lv_conf.h                 ← LVGL 8.3 config used by the CI build
 ├── .github/workflows/compile.yml← ESP32-S3 build + release (manual trigger)
-├── config.h / data_sources.h / utils.h / API_INTEGRATION_GUIDE.md  ← original templates, not used by the sketch
 └── README.md                    ← This file
 ```
 

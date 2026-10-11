@@ -1,9 +1,3 @@
-#include <Adafruit_GFX.h>
-#include <Adafruit_GrayOLED.h>
-#include <Adafruit_SPITFT.h>
-#include <Adafruit_SPITFT_Macros.h>
-#include <gfxfont.h>
-
 /*******************************************************************************
  * ESP32-4848S040 Multi-Screen Dashboard
  * LVGL 8.3.0 Compatible Version with ST7701S Support
@@ -12,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "2.4"
+#define FW_VERSION "2.5"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
