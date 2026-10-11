@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "2.7"
+#define FW_VERSION "2.8"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -239,6 +239,22 @@ static volatile bool stocks_needs_ui_refresh = false;
 static volatile bool calendar_needs_ui_refresh = false;
 static volatile bool makerworld_needs_ui_refresh = false;
 static volatile bool tracking_needs_ui_refresh = false;
+
+// Flight change alert: when a flight refresh changes the times, gate,
+// terminal or status, network_task sets flight_change_pending and loop()
+// shows the Flight screen for FLIGHT_ALERT_MS (if enabled in Settings),
+// with the changes highlighted - see flight_alert_start() in flight.ino.
+#define FLIGHT_CHG_DEP 0x01
+#define FLIGHT_CHG_ARR 0x02
+#define FLIGHT_CHG_GATE 0x04
+#define FLIGHT_CHG_TERMINAL 0x08
+#define FLIGHT_CHG_STATUS 0x10
+#define FLIGHT_ALERT_MS (2UL * 60UL * 1000UL)
+static volatile bool flight_change_pending = false;
+static volatile uint8_t flight_change_mask = 0;
+static uint32_t flight_alert_until_ms = 0; // 0 = no alert showing
+static uint8_t flight_alert_prev_screen = 0;
+static uint8_t flight_alert_mask = 0;
 // Stocks/calendar/MakerWorld/packages/flights are each fetched directly from
 // their service by web_fetch.ino, which keeps its own per-source cadence.
 
@@ -297,6 +313,7 @@ struct DeviceSettings
   char pkge_api_key[96] = "";   // PKGE Business API key (package tracking)
   char aerodatabox_key[96] = ""; // RapidAPI key for AeroDataBox (live flight status, optional)
   uint8_t idle_return_home_min = 5; // one of IDLE_TIMEOUT_OPTIONS_MIN - see create_settings_screen()
+  bool flight_alert = true; // show the Flight screen for 2 min when the flight's data changes
   // Proxmox VE cluster - see proxmox.ino. host is "ip-or-hostname:port"
   // (default port 8006); token_id is the full "user@realm!tokenname" from
   // Datacenter -> Permissions -> API Tokens; token_secret is the UUID shown
@@ -343,7 +360,10 @@ void clock_tick_cb(lv_timer_t *timer)
   // auto-opened it (that case is handled by the finish-triggered return
   // below instead), never while locked, and never while viewing the
   // Calendar day-detail screen (its own back button is the only exit).
-  if (!screen_locked && !in_settings && !in_calendar_day && current_screen != 0)
+  // Flight change alert over: back to whatever was showing before.
+  if (flight_alert_until_ms != 0 && millis() >= flight_alert_until_ms) flight_alert_end(false);
+
+  if (!screen_locked && !in_settings && !in_calendar_day && current_screen != 0 && flight_alert_until_ms == 0)
   {
     bool bambu_auto_exempt = (current_screen == 1 && bambu_screen_auto_opened);
     uint32_t idle_return_home_ms = (uint32_t)settings.idle_return_home_min * 60UL * 1000UL;
@@ -452,6 +472,7 @@ void screen_gesture_cb(lv_event_t *e)
   // swap the screen underneath instantly, then cut back - see
   // go_to_screen_blackout().
   lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+  if (dir == LV_DIR_LEFT || dir == LV_DIR_RIGHT) flight_alert_cancel();
   if (dir == LV_DIR_LEFT)
   {
     bambu_screen_auto_opened = false;
@@ -493,6 +514,7 @@ void go_to_screen_blackout(uint8_t target)
 void corner_tap_next_screen_cb(lv_event_t *e)
 {
   if (screen_locked || in_settings || in_calendar_day) return;
+  flight_alert_cancel();
   bambu_screen_auto_opened = false;
   bambu_auto_return_home_at_ms = 0;
   go_to_screen_blackout(adjacent_screen(current_screen, +1));
@@ -897,6 +919,7 @@ void load_settings()
   prefs.getString("pkge", settings.pkge_api_key, sizeof(settings.pkge_api_key));
   prefs.getString("adbkey", settings.aerodatabox_key, sizeof(settings.aerodatabox_key));
   settings.idle_return_home_min = prefs.getUChar("idlemin", settings.idle_return_home_min);
+  settings.flight_alert = prefs.getBool("fltalert", settings.flight_alert);
   prefs.getString("pxhost", settings.proxmox_host, sizeof(settings.proxmox_host));
   prefs.getString("pxtok", settings.proxmox_token_id, sizeof(settings.proxmox_token_id));
   prefs.getString("pxsec", settings.proxmox_token_secret, sizeof(settings.proxmox_token_secret));
@@ -923,6 +946,7 @@ void save_settings()
   prefs.putString("pkge", settings.pkge_api_key);
   prefs.putString("adbkey", settings.aerodatabox_key);
   prefs.putUChar("idlemin", settings.idle_return_home_min);
+  prefs.putBool("fltalert", settings.flight_alert);
   prefs.putString("pxhost", settings.proxmox_host);
   prefs.putString("pxtok", settings.proxmox_token_id);
   prefs.putString("pxsec", settings.proxmox_token_secret);
@@ -1225,6 +1249,7 @@ static lv_obj_t *settings_screen;
 static lv_obj_t *cal_day_screen; // Calendar day-detail screen - see calendar.ino
 static lv_obj_t *ap_switch;
 static lv_obj_t *auto_bambu_switch;
+static lv_obj_t *flight_alert_switch;
 static lv_obj_t *ap_status_lab;
 static lv_obj_t *idle_timeout_dd;
 // Selectable idle-return-to-Home timeouts, in minutes - index into this
@@ -1296,6 +1321,12 @@ void ap_switch_toggled_cb(lv_event_t *e)
 {
   set_ap_enabled(lv_obj_has_state(ap_switch, LV_STATE_CHECKED));
   update_ap_status_label(); // safe here - this callback runs on the LVGL thread
+}
+
+void flight_alert_switch_toggled_cb(lv_event_t *e)
+{
+  settings.flight_alert = lv_obj_has_state(flight_alert_switch, LV_STATE_CHECKED);
+  save_settings(); // on-device control, applies live immediately
 }
 
 void auto_bambu_switch_toggled_cb(lv_event_t *e)
@@ -1952,8 +1983,8 @@ lv_obj_t *create_settings_screen()
 
   // ---- Setup Access Point ----
   lv_obj_t *ap_row = lv_obj_create(scr);
-  lv_obj_set_size(ap_row, 432, 90);
-  lv_obj_align(ap_row, LV_ALIGN_TOP_LEFT, 0, 60);
+  lv_obj_set_size(ap_row, 432, 78);
+  lv_obj_align(ap_row, LV_ALIGN_TOP_LEFT, 0, 44);
   lv_obj_set_style_bg_color(ap_row, COLOR_BG_LIGHT, LV_PART_MAIN);
   lv_obj_set_style_border_width(ap_row, 0, LV_PART_MAIN);
   lv_obj_set_style_radius(ap_row, 16, LV_PART_MAIN);
@@ -1979,8 +2010,8 @@ lv_obj_t *create_settings_screen()
 
   // ---- Auto-open Bambu screen when a print starts ----
   lv_obj_t *abos_row = lv_obj_create(scr);
-  lv_obj_set_size(abos_row, 432, 70);
-  lv_obj_align(abos_row, LV_ALIGN_TOP_LEFT, 0, 160);
+  lv_obj_set_size(abos_row, 432, 54);
+  lv_obj_align(abos_row, LV_ALIGN_TOP_LEFT, 0, 130);
   lv_obj_set_style_bg_color(abos_row, COLOR_BG_LIGHT, LV_PART_MAIN);
   lv_obj_set_style_border_width(abos_row, 0, LV_PART_MAIN);
   lv_obj_set_style_radius(abos_row, 16, LV_PART_MAIN);
@@ -2000,10 +2031,33 @@ lv_obj_t *create_settings_screen()
   if (settings.auto_show_bambu_on_start) lv_obj_add_state(auto_bambu_switch, LV_STATE_CHECKED);
   lv_obj_add_event_cb(auto_bambu_switch, auto_bambu_switch_toggled_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  // ---- Show the Flight screen for 2 min when the flight changes ----
+  lv_obj_t *falert_row = lv_obj_create(scr);
+  lv_obj_set_size(falert_row, 432, 54);
+  lv_obj_align(falert_row, LV_ALIGN_TOP_LEFT, 0, 192);
+  lv_obj_set_style_bg_color(falert_row, COLOR_BG_LIGHT, LV_PART_MAIN);
+  lv_obj_set_style_border_width(falert_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(falert_row, 16, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(falert_row, 16, LV_PART_MAIN);
+  lv_obj_clear_flag(falert_row, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *falert_title = lv_label_create(falert_row);
+  lv_label_set_text(falert_title, "Show Flight screen on changes (2 min)");
+  lv_obj_set_style_text_color(falert_title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_set_style_text_font(falert_title, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_align(falert_title, LV_ALIGN_TOP_LEFT, 0, 0);
+  lv_obj_set_width(falert_title, 340);
+
+  flight_alert_switch = lv_switch_create(falert_row);
+  lv_obj_set_style_bg_color(flight_alert_switch, COLOR_PRIMARY, LV_PART_INDICATOR | LV_STATE_CHECKED);
+  lv_obj_align(flight_alert_switch, LV_ALIGN_TOP_RIGHT, 0, -4);
+  if (settings.flight_alert) lv_obj_add_state(flight_alert_switch, LV_STATE_CHECKED);
+  lv_obj_add_event_cb(flight_alert_switch, flight_alert_switch_toggled_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
   // ---- Idle return-to-Home timeout ----
   lv_obj_t *idle_row = lv_obj_create(scr);
-  lv_obj_set_size(idle_row, 432, 70);
-  lv_obj_align(idle_row, LV_ALIGN_TOP_LEFT, 0, 240);
+  lv_obj_set_size(idle_row, 432, 54);
+  lv_obj_align(idle_row, LV_ALIGN_TOP_LEFT, 0, 254);
   lv_obj_set_style_bg_color(idle_row, COLOR_BG_LIGHT, LV_PART_MAIN);
   lv_obj_set_style_border_width(idle_row, 0, LV_PART_MAIN);
   lv_obj_set_style_radius(idle_row, 16, LV_PART_MAIN);
@@ -2025,8 +2079,8 @@ lv_obj_t *create_settings_screen()
 
   // ---- Restart device ----
   lv_obj_t *restart_btn = lv_btn_create(scr);
-  lv_obj_set_size(restart_btn, 432, 50);
-  lv_obj_align(restart_btn, LV_ALIGN_TOP_LEFT, 0, 320);
+  lv_obj_set_size(restart_btn, 432, 44);
+  lv_obj_align(restart_btn, LV_ALIGN_TOP_LEFT, 0, 318);
   lv_obj_set_style_bg_color(restart_btn, lv_color_hex(0xEF5350), LV_PART_MAIN);
   lv_obj_set_style_radius(restart_btn, 12, LV_PART_MAIN);
   lv_obj_add_event_cb(restart_btn, restart_btn_clicked_cb, LV_EVENT_CLICKED, NULL);
@@ -2038,7 +2092,7 @@ lv_obj_t *create_settings_screen()
   // ---- Close: the AP toggle above already applies live, so this is the
   // only exit - it turns the AP off and connects to the configured Wi-Fi.
   lv_obj_t *close_btn = lv_btn_create(scr);
-  lv_obj_set_size(close_btn, 432, 50);
+  lv_obj_set_size(close_btn, 432, 48);
   lv_obj_align(close_btn, LV_ALIGN_BOTTOM_MID, 0, 0);
   lv_obj_set_style_bg_color(close_btn, COLOR_PRIMARY, LV_PART_MAIN);
   lv_obj_set_style_radius(close_btn, 12, LV_PART_MAIN);
@@ -2398,6 +2452,7 @@ void loop()
   if (makerworld_needs_ui_refresh) { makerworld_needs_ui_refresh = false; makerworld_apply_to_ui(); }
   if (tracking_needs_ui_refresh) { tracking_needs_ui_refresh = false; tracking_apply_to_ui(); }
   if (bambu_needs_ui_refresh) { bambu_needs_ui_refresh = false; bambu_apply_to_ui(); }
+  if (flight_change_pending) { flight_change_pending = false; flight_alert_start(flight_change_mask); flight_change_mask = 0; }
   if (proxmox_needs_ui_refresh) { proxmox_needs_ui_refresh = false; proxmox_apply_to_ui(); }
   if (wifi_signal_needs_ui_refresh) { wifi_signal_needs_ui_refresh = false; wifi_signal_apply_to_ui(); }
 

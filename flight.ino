@@ -28,6 +28,8 @@ static lv_obj_t *flight_terminal_val = NULL;
 static lv_obj_t *flight_title_lab = NULL;
 static lv_obj_t *flight_source_lab = NULL;
 static lv_obj_t *flight_dest_lab = NULL;
+static lv_obj_t *flight_change_lab = NULL;   // "Updated: gate B7, departure 15:40" during an alert
+static lv_obj_t *flight_alert_overlay = NULL; // full-screen tap target during an alert
 
 static bool flight_live_for(const UpcomingEvent &fl)
 {
@@ -210,6 +212,39 @@ void flight_apply_to_ui()
   lv_label_set_text(flight_gate_val, live && f.dep_gate[0] ? f.dep_gate : "--");
   lv_label_set_text(flight_terminal_val, live && f.dep_terminal[0] ? f.dep_terminal : "--");
 
+  // During a change alert: changed values in yellow and a banner listing them.
+  uint8_t chg = flight_alert_until_ms ? flight_alert_mask : 0;
+  const lv_color_t hl = COLOR_WARNING;
+  if (chg & FLIGHT_CHG_DEP) lv_obj_set_style_text_color(flight_dep_val, hl, LV_PART_MAIN);
+  lv_obj_set_style_text_color(flight_arr_val, (chg & FLIGHT_CHG_ARR) ? hl : COLOR_PRIMARY, LV_PART_MAIN);
+  lv_obj_set_style_text_color(flight_gate_val, (chg & FLIGHT_CHG_GATE) ? hl : COLOR_SECONDARY, LV_PART_MAIN);
+  lv_obj_set_style_text_color(flight_terminal_val, (chg & FLIGHT_CHG_TERMINAL) ? hl : COLOR_SECONDARY, LV_PART_MAIN);
+  if (chg)
+  {
+    char banner[96] = "Updated:";
+    size_t len = strlen(banner);
+    bool first = true;
+    auto add = [&](const char *what, const char *val) {
+      if (len >= sizeof(banner)) return;
+      len += snprintf(banner + len, sizeof(banner) - len, "%s %s %s", first ? "" : ",", what, val);
+      first = false;
+    };
+    char t[8];
+    if (chg & FLIGHT_CHG_DEP) { flight_local_clock(f.dep_local, dep, t, sizeof(t)); add("departure", t); }
+    if (chg & FLIGHT_CHG_ARR) { flight_local_clock(f.arr_local, arr, t, sizeof(t)); add("arrival", t); }
+    if (chg & FLIGHT_CHG_GATE) add("gate", f.dep_gate[0] ? f.dep_gate : "-");
+    if (chg & FLIGHT_CHG_TERMINAL) add("terminal", f.dep_terminal[0] ? f.dep_terminal : "-");
+    if (chg & FLIGHT_CHG_STATUS) add("status", pill);
+    lv_label_set_text(flight_change_lab, banner);
+    lv_obj_clear_flag(flight_change_lab, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(flight_title_lab, LV_OBJ_FLAG_HIDDEN);
+  }
+  else
+  {
+    lv_obj_add_flag(flight_change_lab, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(flight_title_lab, LV_OBJ_FLAG_HIDDEN);
+  }
+
   lv_label_set_text(flight_title_lab, fl.title);
   if (!settings.aerodatabox_key[0])
     lv_label_set_text(flight_source_lab, "Times from your calendar - add an AeroDataBox key for live status");
@@ -234,8 +269,50 @@ void flight_refresh_screen()
 {
   bool active = flight_screen_active();
   if (active) flight_apply_to_ui();
+  if (!active) flight_alert_cancel();
   if (!active && current_screen == FLIGHT_SCREEN_INDEX && !in_settings) go_to_screen_blackout(0);
   else if (page_dots[0]) update_page_indicator(current_screen);
+}
+
+// ==================== Flight change alert ====================
+// A flight refresh changed the times, gate, terminal or status (see
+// flight_maintain() in web_fetch.ino): show the Flight screen for 2 minutes
+// with the changes highlighted, then go back to the previous screen. A tap
+// anywhere during the alert goes to Home; a swipe just navigates normally.
+void flight_alert_start(uint8_t mask)
+{
+  if (!mask || !settings.flight_alert || screen_locked || in_settings || in_calendar_day || !flight_screen_active()) return;
+  if (flight_alert_until_ms == 0) flight_alert_prev_screen = current_screen;
+  flight_alert_mask |= mask;
+  flight_alert_until_ms = millis() + FLIGHT_ALERT_MS;
+  if (flight_alert_overlay) lv_obj_clear_flag(flight_alert_overlay, LV_OBJ_FLAG_HIDDEN);
+  flight_apply_to_ui();
+  if (current_screen != FLIGHT_SCREEN_INDEX) go_to_screen_blackout(FLIGHT_SCREEN_INDEX);
+}
+
+// Clears the alert without moving (the user navigated away themselves).
+void flight_alert_cancel()
+{
+  if (flight_alert_until_ms == 0) return;
+  flight_alert_until_ms = 0;
+  flight_alert_mask = 0;
+  if (flight_alert_overlay) lv_obj_add_flag(flight_alert_overlay, LV_OBJ_FLAG_HIDDEN);
+  flight_apply_to_ui();
+}
+
+// Ends the alert: back to the screen shown before it, or Home.
+void flight_alert_end(bool go_home)
+{
+  if (flight_alert_until_ms == 0) return;
+  uint8_t target = go_home ? 0 : flight_alert_prev_screen;
+  flight_alert_cancel();
+  if (current_screen == FLIGHT_SCREEN_INDEX && !in_settings && !screen_locked && target != FLIGHT_SCREEN_INDEX)
+    go_to_screen_blackout(screen_available(target) ? target : 0);
+}
+
+void flight_alert_tap_cb(lv_event_t *e)
+{
+  flight_alert_end(true);
 }
 
 // ==================== Screen 8: Flight ====================
@@ -307,6 +384,20 @@ lv_obj_t *create_flight_screen()
   lv_label_set_long_mode(flight_dest_lab, LV_LABEL_LONG_DOT);
   lv_obj_align(flight_dest_lab, LV_ALIGN_TOP_MID, 0, 334);
 
+  flight_change_lab = lv_label_create(scr);
+  lv_label_set_text(flight_change_lab, "");
+  lv_obj_set_style_text_color(flight_change_lab, lv_color_hex(0x2B2000), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(flight_change_lab, COLOR_WARNING, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(flight_change_lab, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_radius(flight_change_lab, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_hor(flight_change_lab, 12, LV_PART_MAIN);
+  lv_obj_set_style_pad_ver(flight_change_lab, 4, LV_PART_MAIN);
+  lv_obj_set_style_text_font(flight_change_lab, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_max_width(flight_change_lab, 440, LV_PART_MAIN);
+  lv_label_set_long_mode(flight_change_lab, LV_LABEL_LONG_DOT);
+  lv_obj_align(flight_change_lab, LV_ALIGN_TOP_MID, 0, 360);
+  lv_obj_add_flag(flight_change_lab, LV_OBJ_FLAG_HIDDEN);
+
   flight_title_lab = lv_label_create(scr);
   lv_label_set_text(flight_title_lab, "");
   lv_obj_set_style_text_color(flight_title_lab, lv_color_hex(0xE8EDF2), LV_PART_MAIN);
@@ -324,6 +415,18 @@ lv_obj_t *create_flight_screen()
   lv_obj_set_style_text_align(flight_source_lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_long_mode(flight_source_lab, LV_LABEL_LONG_WRAP);
   lv_obj_align(flight_source_lab, LV_ALIGN_TOP_MID, 0, 386);
+
+  // Transparent tap target over everything, only while an alert shows.
+  // Gestures still bubble to the screen, so swiping keeps working.
+  flight_alert_overlay = lv_obj_create(scr);
+  lv_obj_set_size(flight_alert_overlay, 480, 480);
+  lv_obj_set_pos(flight_alert_overlay, 0, 0);
+  lv_obj_set_style_bg_opa(flight_alert_overlay, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(flight_alert_overlay, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(flight_alert_overlay, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(flight_alert_overlay, LV_OBJ_FLAG_GESTURE_BUBBLE);
+  lv_obj_add_event_cb(flight_alert_overlay, flight_alert_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);
+  lv_obj_add_flag(flight_alert_overlay, LV_OBJ_FLAG_HIDDEN);
 
   return scr;
 }

@@ -232,9 +232,21 @@ bool flight_maintain()
                       (f.last_fetch == 0 || now - f.last_fetch >= FLIGHT_SCHEDULE_REFRESH_S);
   due = due || schedule_due;
 
+  uint8_t change = 0;
   if (due)
   {
-    df_fetch_flight(settings.aerodatabox_key, &f);
+    LiveFlight before = f;
+    bool ok = df_fetch_flight(settings.aerodatabox_key, &f);
+    // What changed since the last good answer (not on the first one).
+    if (ok && before.valid)
+    {
+      if (strcmp(before.dep_local, f.dep_local)) change |= FLIGHT_CHG_DEP;
+      if (strcmp(before.arr_local, f.arr_local)) change |= FLIGHT_CHG_ARR;
+      if (strcmp(before.dep_gate, f.dep_gate)) change |= FLIGHT_CHG_GATE;
+      if (strcmp(before.dep_terminal, f.dep_terminal)) change |= FLIGHT_CHG_TERMINAL;
+      if (strcmp(before.status, f.status)) change |= FLIGHT_CHG_STATUS;
+      if (change) Serial.printf("[Flight] Changed (mask 0x%02x)\n", change);
+    }
     f.last_fetch = time(nullptr); // also after a failure: retried at the next interval
     f.requests++;
     changed = true;
@@ -256,6 +268,11 @@ bool flight_maintain()
     live_flight = f;
     data_unlock();
     calendar_needs_ui_refresh = true; // redraws the Home strip
+  }
+  if (change)
+  {
+    flight_change_mask |= change;
+    flight_change_pending = true; // loop() shows the Flight screen
   }
   return due || weather_due;
 }
