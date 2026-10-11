@@ -9,7 +9,7 @@
 // Everything here runs on network_task, never on the LVGL thread: results
 // are copied in under data_lock() and a *_needs_ui_refresh flag tells
 // loop() to redraw. Weather and Proxmox keep their own fetchers
-// (fetch_weather() in esp32_dashboard.ino, proxmox_fetch() in proxmox.ino).
+// (fetch_weather() in ESP32-4848S040.ino, proxmox_fetch() in proxmox.ino).
 //
 // This file is named to sort alphabetically after calendar.ino/
 // makerworld.ino/stocks.ino/tracking.ino, so the variables it writes into
@@ -30,7 +30,9 @@
 #define FLIGHT_LIVE_REFRESH_S (30 * 60)     // and is refreshed every 30 minutes until landing,
 #define FLIGHT_LIVE_FAST_S (10 * 60)        // every 10 minutes within an hour of departure or landing
 #define FLIGHT_LIVE_AFTER_MAX_S (3 * 3600)  // safety: never follow a flight more than 3 h past its expected landing
-#define FLIGHT_LIVE_MAX_REQUESTS 30         // safety: at most this many AeroDataBox requests per flight
+#define FLIGHT_LIVE_MAX_REQUESTS 40         // safety: at most this many AeroDataBox requests per flight
+#define FLIGHT_SCHEDULE_REFRESH_S (24 * 3600) // before the live window: real schedule once a day
+#define FLIGHT_DEST_WEATHER_S (60 * 60)     // destination weather: hourly
 
 static uint32_t last_stocks_fetch_ms = 0;
 static uint32_t last_calendar_fetch_ms = 0;
@@ -200,7 +202,8 @@ bool flight_maintain()
   data_unlock();
 
   bool changed = false;
-  if (next.start && next.start != f.cal_start && next.start - now < FLIGHT_LIVE_BEFORE_S)
+  // A new flight in the calendar (up to 7 days ahead): start following it.
+  if (next.start && next.start != f.cal_start)
   {
     f = {};
     f.cal_start = next.start;
@@ -221,14 +224,29 @@ bool flight_maintain()
   time_t arr = f.arr_actual ? f.arr_actual : f.arr_scheduled;
   bool near_movement = (now > dep - 3600 && now < dep + 1800) || (arr && now > arr - 3600 && now < arr + 1800);
   time_t refresh = near_movement ? FLIGHT_LIVE_FAST_S : FLIGHT_LIVE_REFRESH_S;
-  bool due = live_window && !finished && f.number[0] && settings.aerodatabox_key[0] &&
-             f.requests < FLIGHT_LIVE_MAX_REQUESTS && (f.last_fetch == 0 || now - f.last_fetch >= refresh);
+  bool can_fetch = !finished && f.number[0] && settings.aerodatabox_key[0] && f.requests < FLIGHT_LIVE_MAX_REQUESTS;
+  bool due = can_fetch && live_window && (f.last_fetch == 0 || now - f.last_fetch >= refresh);
+  // The calendar entry only identifies the flight: fetch the real schedule
+  // as soon as it appears, then once a day until the live window starts.
+  bool schedule_due = can_fetch && !live_window && f.cal_start && now < f.cal_start &&
+                      (f.last_fetch == 0 || now - f.last_fetch >= FLIGHT_SCHEDULE_REFRESH_S);
+  due = due || schedule_due;
 
   if (due)
   {
     df_fetch_flight(settings.aerodatabox_key, &f);
     f.last_fetch = time(nullptr); // also after a failure: retried at the next interval
     f.requests++;
+    changed = true;
+  }
+
+  // Current weather at the destination, for the Flight screen.
+  bool weather_due = f.valid && f.arr_has_location && now < live_limit &&
+                     (f.dest_fetch == 0 || now - f.dest_fetch >= FLIGHT_DEST_WEATHER_S);
+  if (weather_due)
+  {
+    f.dest_fetch = now;
+    f.dest_valid = df_fetch_current_weather(f.arr_lat, f.arr_lon, &f.dest_temp, &f.dest_wcode) || f.dest_valid;
     changed = true;
   }
 
@@ -239,7 +257,7 @@ bool flight_maintain()
     data_unlock();
     calendar_needs_ui_refresh = true; // redraws the Home strip
   }
-  return due;
+  return due || weather_due;
 }
 
 // Everything at once - right after Wi-Fi connects. MakerWorld goes last

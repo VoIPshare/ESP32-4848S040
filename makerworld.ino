@@ -9,7 +9,7 @@
 // This is an Arduino multi-tab sketch: all .ino files in this folder are
 // concatenated into one translation unit at build time, so no #include of
 // this file is needed. makerworld_needs_ui_refresh lives in
-// esp32_dashboard.ino's top globals block instead of here, since
+// ESP32-4848S040.ino's top globals block instead of here, since
 // network_task()/loop() there read/write it directly and that file is
 // always compiled first - see its comment.
 struct MakerWorldStats

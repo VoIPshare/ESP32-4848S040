@@ -1,4 +1,4 @@
-name: Compile ESP32-S3 Dashboard
+name: Compile ESP32-4848S040
 
 on:
   workflow_dispatch:
@@ -7,13 +7,13 @@ env:
   ESP32_CORE_VERSION: 3.3.12
   ARDUINO_CLI_VERSION: 1.5.1
   # ESP32-4848S040: ESP32-S3 with 16 MB flash and 8 MB octal PSRAM. The sketch
-  # refuses to build for any other chip (#error in esp32_dashboard.ino).
+  # refuses to build for any other chip (#error in ESP32-4848S040.ino).
   FQBN: esp32:esp32:esp32s3
   BOARD_OPTIONS: PSRAM=opi,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB
 
 jobs:
   # --------------------------------------------------
-  # Read FW_VERSION from esp32_dashboard.ino, refuse a version already released
+  # Read FW_VERSION from ESP32-4848S040.ino, refuse a version already released
   # --------------------------------------------------
   version:
     runs-on: ubuntu-24.04
@@ -28,13 +28,13 @@ jobs:
       - name: Read firmware version
         id: read
         run: |
-          VERSION=$(sed -n 's/^#define FW_VERSION *"\([^"]*\)".*/\1/p' esp32_dashboard.ino)
+          VERSION=$(sed -n 's/^#define FW_VERSION *"\([^"]*\)".*/\1/p' ESP32-4848S040.ino)
           if ! [[ "$VERSION" =~ ^[0-9A-Za-z._-]+$ ]]; then
-            echo "::error::Could not read FW_VERSION from esp32_dashboard.ino (got '$VERSION')"
+            echo "::error::Could not read FW_VERSION from ESP32-4848S040.ino (got '$VERSION')"
             exit 1
           fi
           if git rev-parse -q --verify "refs/tags/firmware-$VERSION" >/dev/null; then
-            echo "::error::firmware-$VERSION is already released: bump FW_VERSION in esp32_dashboard.ino"
+            echo "::error::firmware-$VERSION is already released: bump FW_VERSION in ESP32-4848S040.ino"
             exit 1
           fi
           echo "Firmware version $VERSION"
@@ -106,7 +106,7 @@ jobs:
             --board-options ${{ env.BOARD_OPTIONS }} \
             --export-binaries \
             --output-dir build_esp32s3 \
-            ./esp32_dashboard.ino
+            ./ESP32-4848S040.ino
 
       - name: Rename firmware
         run: |

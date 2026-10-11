@@ -1,6 +1,6 @@
-# ESP32-4848S040 Multi-Screen Dashboard
+# ESP32-4848S040
 
-A dashboard application for the 480×480 4-inch ESP32-4848S040 display (ESP32-S3), built with LVGL, featuring seven swipeable screens. The ESP32 fetches every widget's data itself, directly from each service: no Google Apps Script or other server in between (same approach as the [e-ink dashboard](https://github.com/VoIPshare/ESP32-eInk-Dashboard)).
+A dashboard application for the 480×480 4-inch ESP32-4848S040 display (ESP32-S3), built with LVGL, featuring up to eight swipeable touch screens. The ESP32 fetches every widget's data itself, directly from each service: no Google Apps Script or other server in between (same approach as the [e-ink dashboard](https://github.com/VoIPshare/ESP32-eInk-Dashboard)).
 
 ## Features
 
@@ -74,7 +74,7 @@ Edit `lv_conf.h` and uncomment/set:
 ### 4. Upload
 
 1. Connect the ESP32-4848S040 via USB-C; select the port under Tools → Port
-2. Open `esp32_dashboard.ino`, click Upload
+2. Open `ESP32-4848S040.ino`, click Upload
 3. If upload fails, hold the **BOOT** button while uploading, release once it starts
 4. Tools → Serial Monitor, baud rate **115200** — you should see `Setup complete!`
 
@@ -127,7 +127,7 @@ Settings from older firmware are kept; the old latitude/longitude become the wea
 
 ## Continuous integration
 
-`.github/workflows/compile.yml` (run it from the Actions tab) builds the firmware for the ESP32-S3 only, with LVGL 8.3.11 and `ci/lv_conf.h`, reads `FW_VERSION` from `esp32_dashboard.ino`, and on `main` publishes the binaries as release `firmware-<version>`. Bump `FW_VERSION` before each release; the workflow refuses a version that's already released.
+`.github/workflows/compile.yml` (run it from the Actions tab) builds the firmware for the ESP32-S3 only, with LVGL 8.3.11 and `ci/lv_conf.h`, reads `FW_VERSION` from `ESP32-4848S040.ino`, and on `main` publishes the binaries as release `firmware-<version>`. Bump `FW_VERSION` before each release; the workflow refuses a version that's already released.
 
 ## Hardware Reference
 
@@ -165,7 +165,7 @@ Available GPIO for other uses: 2, 19, 34, 35, 36, 37, 40, 41, 42, 43, 44, 45 (so
 
 - Each screen lives in its own tab (`bambu.ino`, `calendar.ino`, ...) with a `create_*_screen()` builder and a `*_apply_to_ui()` refresh. To add one, add it to `screens[]` in `setup()` and bump `SCREEN_COUNT`.
 - Network work runs on `network_task` (core 0) and must never call LVGL: write the data under `data_lock()`, set a `*_needs_ui_refresh` flag, and let `loop()` apply it.
-- Set `DEBUG` at the top of `esp32_dashboard.ino` to 0 to silence verbose Serial output.
+- Set `DEBUG` at the top of `ESP32-4848S040.ino` to 0 to silence verbose Serial output.
 
 ## Data flow
 
@@ -226,7 +226,7 @@ network_task (core 0)                         loop() (core 1, LVGL)
 - See [LVGL Version Compatibility](#lvgl-version-compatibility) above
 
 **Touch in the wrong place**
-- Adjust `TOUCH_ROTATION_STEPS` (0-3) at the top of `esp32_dashboard.ino`
+- Adjust `TOUCH_ROTATION_STEPS` (0-3) at the top of `ESP32-4848S040.ino`
 
 **A screen stays empty or shows "fetch failed"**
 - Check its field on the setup page, and watch the Serial log (115200 baud): each source logs its HTTP result (`[ICS]`, `[Stocks]`, `[MakerWorld]`, `[Tracking]`, `[Flight]`, `[Weather]`)
@@ -234,8 +234,8 @@ network_task (core 0)                         loop() (core 1, LVGL)
 ## File Structure
 
 ```
-esp32_dashboard/
-├── esp32_dashboard.ino          ← Main sketch (upload this): display, Home, settings, Wi-Fi portal, network task
+ESP32-4848S040/
+├── ESP32-4848S040.ino          ← Main sketch (upload this): display, Home, settings, Wi-Fi portal, network task
 ├── bambu.ino / calendar.ino / proxmox.ino / stocks.ino / makerworld.ino / tracking.ino / flight.ino  ← one tab per screen
 ├── web_fetch.ino                ← schedules the direct fetches and copies results into the screens
 ├── direct_fetch.cpp/.h          ← Open-Meteo geocoding, Yahoo, iCal parser, MakerWorld, PKGE, AeroDataBox

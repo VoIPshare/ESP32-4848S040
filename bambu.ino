@@ -1,20 +1,20 @@
 // ==================== Bambu Lab printer (local MQTT) ====================
-// Split out of esp32_dashboard.ino: everything specific to the Bambu Lab
+// Split out of ESP32-4848S040.ino: everything specific to the Bambu Lab
 // printer widget - the local-MQTT client, HMS warning decoding, the
 // print-finish flash/badge-flash effects, and the Bambu screen itself.
 //
 // This is an Arduino multi-tab sketch: all .ino files in this folder are
 // concatenated into one translation unit at build time (main sketch first,
 // then the rest alphabetically), so no #include of this file is needed and
-// functions/globals defined here are visible from esp32_dashboard.ino and
-// vice versa. A few pieces of Bambu state that esp32_dashboard.ino's
+// functions/globals defined here are visible from ESP32-4848S040.ino and
+// vice versa. A few pieces of Bambu state that ESP32-4848S040.ino's
 // loop()/network_task()/Wi-Fi portal touch directly (not just via a function
 // call) - bambu_pname_lab, bambu_live_product_name, bambu_needs_ui_refresh,
-// bambu_fail_count, bambu_gave_up - stay declared in esp32_dashboard.ino's
+// bambu_fail_count, bambu_gave_up - stay declared in ESP32-4848S040.ino's
 // top globals block so they're declared before those earlier use points.
 // Set to 0 to silence every Serial log this file produces (MQTT connect
 // status, HMS/field-parsing traces, etc.) - independent of the sketch-wide
-// DEBUG flag in esp32_dashboard.ino, so Bambu's especially chatty MQTT
+// DEBUG flag in ESP32-4848S040.ino, so Bambu's especially chatty MQTT
 // traffic can be quieted at compile time without touching logging for
 // weather/stocks/calendar/etc.
 #define BAMBU_LOG_ENABLED 0
@@ -76,7 +76,7 @@ static uint32_t bambu_last_attempt_ms = 0;
 
 // Bambu screen widgets updated live from bambu_apply_to_ui() - populated by
 // create_bambu_screen(). (bambu_pname_lab and bambu_live_product_name are
-// declared in esp32_dashboard.ino - see the file header comment above.)
+// declared in ESP32-4848S040.ino - see the file header comment above.)
 static lv_obj_t *bambu_ams_temp_val = NULL;
 static lv_obj_t *bambu_ams_hum_val = NULL;
 static lv_obj_t *bambu_job_lab = NULL;
@@ -997,7 +997,7 @@ lv_obj_t *create_bambu_screen()
 }
 
 // Same construction as create_blackout_overlay(): opaque, never animated -
-// see esp32_dashboard.ino's screen_gesture_cb() for why. Green, and created
+// see ESP32-4848S040.ino's screen_gesture_cb() for why. Green, and created
 // after the blackout overlay so it draws on top if both were ever visible.
 void create_finish_flash_overlay()
 {

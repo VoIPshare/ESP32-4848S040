@@ -1066,11 +1066,15 @@ bool df_fetch_flight(const char *api_key, LiveFlight *f)
   fl["status"] = true;
   for (const char *dir : {"departure", "arrival"})
   {
-    fl[dir]["scheduledTime"]["utc"] = true;
-    fl[dir]["revisedTime"]["utc"] = true;
-    fl[dir]["runwayTime"]["utc"] = true;
+    for (const char *t : {"scheduledTime", "revisedTime", "runwayTime"})
+    {
+      fl[dir][t]["utc"] = true;
+      fl[dir][t]["local"] = true;
+    }
     fl[dir]["gate"] = true;
     fl[dir]["terminal"] = true;
+    fl[dir]["airport"]["municipalityName"] = true;
+    fl[dir]["airport"]["location"] = true;
   }
 
   JsonDocument doc;
@@ -1104,9 +1108,45 @@ bool df_fetch_flight(const char *api_key, LiveFlight *f)
   f->arr_actual = actual_time(arr);
   snprintf(f->dep_gate, sizeof(f->dep_gate), "%s", dep["gate"] | "");
   snprintf(f->dep_terminal, sizeof(f->dep_terminal), "%s", dep["terminal"] | "");
+
+  // Airport-local "2026-10-12 14:05-04:00" -> "2026-10-12 14:05".
+  auto local = [](JsonObject movement, char *out, size_t n, bool actual) {
+    const char *s = actual ? (movement["revisedTime"]["local"] | (movement["runwayTime"]["local"] | ""))
+                           : (const char *)nullptr;
+    if (!s || !s[0]) s = movement["scheduledTime"]["local"] | "";
+    snprintf(out, n, "%.16s", s);
+  };
+  local(dep, f->dep_sched_local, sizeof(f->dep_sched_local), false);
+  local(dep, f->dep_local, sizeof(f->dep_local), true);
+  local(arr, f->arr_local, sizeof(f->arr_local), true);
+  snprintf(f->dep_city, sizeof(f->dep_city), "%s", dep["airport"]["municipalityName"] | "");
+  snprintf(f->arr_city, sizeof(f->arr_city), "%s", arr["airport"]["municipalityName"] | "");
+  JsonObject loc = arr["airport"]["location"];
+  f->arr_has_location = !loc.isNull() && !loc["lat"].isNull();
+  if (f->arr_has_location)
+  {
+    f->arr_lat = loc["lat"] | 0.0f;
+    f->arr_lon = loc["lon"] | 0.0f;
+  }
   f->valid = true;
 
-  Serial.printf("[Flight] %s %s, gate %s\n", f->number, f->status, f->dep_gate[0] ? f->dep_gate : "-");
+  Serial.printf("[Flight] %s %s, dep %s (%s) arr %s (%s), gate %s\n", f->number, f->status,
+                f->dep_local, f->dep_city, f->arr_local, f->arr_city, f->dep_gate[0] ? f->dep_gate : "-");
+  return true;
+}
+
+bool df_fetch_current_weather(float lat, float lon, float *temp, int *wcode)
+{
+  char url[200];
+  snprintf(url, sizeof(url),
+           "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,weather_code",
+           lat, lon);
+  JsonDocument doc;
+  if (!http_get_json(url, doc)) return false;
+  JsonObject cur = doc["current"];
+  if (cur.isNull() || cur["temperature_2m"].isNull()) return false;
+  *temp = cur["temperature_2m"] | 0.0f;
+  *wcode = cur["weather_code"] | 0;
   return true;
 }
 
@@ -1206,7 +1246,8 @@ static void format_clock(time_t t, char *buf, size_t n)
 void df_format_live_flight(const LiveFlight &f, char *buf, size_t n)
 {
   char arr[8];
-  format_clock(f.arr_actual ? f.arr_actual : f.arr_scheduled, arr, sizeof(arr));
+  if (strlen(f.arr_local) >= 16) snprintf(arr, sizeof(arr), "%.5s", f.arr_local + 11); // airport-local time
+  else format_clock(f.arr_actual ? f.arr_actual : f.arr_scheduled, arr, sizeof(arr));
   long delay_min = (f.dep_actual && f.dep_scheduled) ? (long)(f.dep_actual - f.dep_scheduled) / 60 : 0;
 
   if (!strcmp(f.status, "Canceled")) { snprintf(buf, n, "CANCELED"); return; }

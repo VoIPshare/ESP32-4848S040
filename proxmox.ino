@@ -1,8 +1,8 @@
 // ==================== Screen 5: Proxmox ====================
-// Split out of esp32_dashboard.ino. Talks to a real Proxmox VE cluster over
+// Split out of ESP32-4848S040.ino. Talks to a real Proxmox VE cluster over
 // its REST API (https://<host>/api2/json/cluster/resources) using an API
 // token from settings.proxmox_host/proxmox_token_id/proxmox_token_secret -
-// see esp32_dashboard.ino's build_settings_page() for where those are set.
+// see ESP32-4848S040.ino's build_settings_page() for where those are set.
 //
 // cluster/resources is used instead of /nodes (or one call per node) because
 // it returns nodes, VMs (qemu) and containers (lxc) for the whole cluster in
@@ -12,8 +12,8 @@
 // This is an Arduino multi-tab sketch: all .ino files in this folder are
 // concatenated into one translation unit at build time, so no #include of
 // this file is needed - create_proxmox_screen() is called directly from
-// setup() in esp32_dashboard.ino. proxmox_needs_ui_refresh/last_proxmox_fetch_ms
-// stay declared in esp32_dashboard.ino's top globals block since
+// setup() in ESP32-4848S040.ino. proxmox_needs_ui_refresh/last_proxmox_fetch_ms
+// stay declared in ESP32-4848S040.ino's top globals block since
 // network_task()/loop() there read/write them directly - see that file's
 // comment.
 // 3, not more: a 3-node cluster is the most common home/lab size (odd count

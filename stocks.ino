@@ -1,5 +1,5 @@
 // ==================== Stocks ====================
-// Split out of esp32_dashboard.ino: the Stocks screen, plus stocks_apply_to_ui()
+// Split out of ESP32-4848S040.ino: the Stocks screen, plus stocks_apply_to_ui()
 // to push fetched quotes into it.
 //
 // stocks[] is filled by web_fetch.ino with Yahoo Finance quotes for the
@@ -10,8 +10,8 @@
 // This is an Arduino multi-tab sketch: all .ino files in this folder are
 // concatenated into one translation unit at build time, so no #include of
 // this file is needed and functions/globals here are visible from
-// esp32_dashboard.ino and vice versa. stocks_needs_ui_refresh stays
-// declared in esp32_dashboard.ino's top globals block since network_task()/
+// ESP32-4848S040.ino and vice versa. stocks_needs_ui_refresh stays
+// declared in ESP32-4848S040.ino's top globals block since network_task()/
 // loop() there read/write it directly (not just via a function call), and
 // that file is always compiled first.
 #define STOCK_COUNT 7

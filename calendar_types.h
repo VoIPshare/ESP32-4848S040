@@ -65,6 +65,19 @@ struct LiveFlight
   time_t arr_scheduled, arr_actual;
   char dep_gate[8];
   char dep_terminal[8];
+  // Airport-local times as AeroDataBox gives them, "2026-10-12 14:05" (empty if unknown):
+  char dep_sched_local[17];
+  char dep_local[17]; // actual/estimated departure, else scheduled
+  char arr_local[17]; // actual/estimated arrival, else scheduled
+  char dep_city[24];
+  char arr_city[24];
+  bool arr_has_location;
+  float arr_lat, arr_lon;
+  // Current weather at the destination (Open-Meteo), refreshed hourly.
+  bool dest_valid;
+  float dest_temp;
+  int dest_wcode;
+  time_t dest_fetch;
 };
 
 #endif // __CALENDAR_TYPES_H__

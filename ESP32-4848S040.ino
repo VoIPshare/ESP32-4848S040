@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "2.5"
+#define FW_VERSION "2.7"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -148,6 +148,7 @@ static uint16_t demo_year = 2026; // full year (not tm_year's since-1900 form), 
 // Live-updated weather widgets on the Home screen (see fetch_weather()).
 static lv_obj_t *weather_temp_lab = NULL;
 static lv_obj_t *weather_desc_lab = NULL;
+static lv_obj_t *weather_extra_lab = NULL; // "Feels like 15° - H 19° L 9°"
 static lv_obj_t *weather_humidity_val = NULL;
 static lv_obj_t *weather_wind_val = NULL;
 static lv_obj_t *weather_uv_val = NULL;
@@ -736,6 +737,9 @@ struct WeatherData
   float uv = 0;
   int wcode = 0;
   bool is_day = true;
+  float feels = 0;
+  float tmax = 0, tmin = 0;
+  bool has_daily = false;
 };
 static WeatherData weather_data;
 static volatile bool weather_needs_ui_refresh = false;
@@ -747,6 +751,14 @@ void weather_apply_to_ui()
   // character - fine for most climates but flag it if you're somewhere cold.
   if (weather_temp_lab) lv_label_set_text_fmt(weather_temp_lab, "%.0f\xC2\xB0" "C", weather_data.temp);
   if (weather_desc_lab) lv_label_set_text(weather_desc_lab, wmo_weather_desc(weather_data.wcode));
+  if (weather_extra_lab)
+  {
+    if (weather_data.has_daily)
+      lv_label_set_text_fmt(weather_extra_lab, "Feels like %.0f\xC2\xB0  \xE2\x80\xA2  H %.0f\xC2\xB0  L %.0f\xC2\xB0",
+                            weather_data.feels, weather_data.tmax, weather_data.tmin);
+    else
+      lv_label_set_text_fmt(weather_extra_lab, "Feels like %.0f\xC2\xB0", weather_data.feels);
+  }
   set_weather_icon(wmo_weather_icon(weather_data.wcode), weather_data.is_day);
   if (weather_humidity_val) lv_label_set_text_fmt(weather_humidity_val, "%d%%", weather_data.humidity);
   if (weather_wind_val) lv_label_set_text_fmt(weather_wind_val, "%.0f km/h", weather_data.wind);
@@ -793,10 +805,11 @@ void fetch_weather()
     return;
   }
 
-  char url[192];
+  char url[360];
   snprintf(url, sizeof(url),
            "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
-           "&current=temperature_2m,relative_humidity_2m,wind_speed_10m,uv_index,weather_code,is_day&timezone=auto",
+           "&current=temperature_2m,relative_humidity_2m,wind_speed_10m,uv_index,weather_code,is_day,apparent_temperature"
+           "&daily=temperature_2m_max,temperature_2m_min&forecast_days=1&timezone=auto",
            lat, lon);
 
   WiFiClientSecure client;
@@ -839,6 +852,14 @@ void fetch_weather()
   weather_data.uv = current["uv_index"] | 0.0f;
   weather_data.wcode = current["weather_code"] | 0;
   weather_data.is_day = (current["is_day"] | 1) != 0;
+  weather_data.feels = current["apparent_temperature"] | weather_data.temp;
+  JsonArray tmax = doc["daily"]["temperature_2m_max"], tmin = doc["daily"]["temperature_2m_min"];
+  weather_data.has_daily = !tmax.isNull() && !tmin.isNull() && tmax.size() > 0;
+  if (weather_data.has_daily)
+  {
+    weather_data.tmax = tmax[0] | 0.0f;
+    weather_data.tmin = tmin[0] | 0.0f;
+  }
   weather_needs_ui_refresh = true;
 
   Serial.printf("[Weather] %.1f C, %s\n", weather_data.temp, wmo_weather_desc(weather_data.wcode));
@@ -1656,7 +1677,7 @@ void build_weather_icon(lv_obj_t *weather_panel)
 {
   lv_obj_t *icon = lv_obj_create(weather_panel);
   lv_obj_set_size(icon, 210, 130);
-  lv_obj_set_pos(icon, 8, 18);
+  lv_obj_set_pos(icon, 8, 8); // leaves room for the condition text under it
   lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(icon, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(icon, 0, LV_PART_MAIN);
@@ -1827,14 +1848,23 @@ lv_obj_t *create_home_screen()
   lv_obj_align(temp, LV_ALIGN_TOP_RIGHT, -24, 24);
   weather_temp_lab = temp;
 
-  // y pulled up from 96 to 90 to keep the same tight ~2px gap under temp,
-  // now that lv_font_roboto_regular_86's shorter line_height (63 vs the old
-  // lv_font_roboto_bold_94's 70) leaves temp's own bottom edge higher up.
+  // The right side is all about the current temperature: the big number,
+  // then feels-like and today's high/low right under it.
+  lv_obj_t *extra = lv_label_create(weather_panel);
+  lv_label_set_text(extra, "");
+  lv_obj_set_style_text_color(extra, lv_color_hex(0xB0BEC5), LV_PART_MAIN);
+  lv_obj_set_style_text_font(extra, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_align(extra, LV_ALIGN_TOP_RIGHT, -24, 92);
+  weather_extra_lab = extra;
+
+  // The condition ("Overcast", "Rain", ...) belongs to the icon: centered under it.
   lv_obj_t *desc = lv_label_create(weather_panel);
   lv_label_set_text(desc, "Partly Cloudy");
   lv_obj_set_style_text_color(desc, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(desc, &lv_font_montserrat_18, LV_PART_MAIN);
-  lv_obj_align(desc, LV_ALIGN_TOP_RIGHT, -24, 90);
+  lv_obj_set_style_text_font(desc, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_width(desc, 210);
+  lv_obj_set_style_text_align(desc, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_pos(desc, 8, 141);
   weather_desc_lab = desc;
 
   // Stats row

@@ -1,8 +1,10 @@
 // ==================== Flight ====================
 // Details of the next flight found in the calendar (calendar->next_flight,
 // see df_is_flight_title()): route, countdown, departure/arrival times,
-// gate and terminal. With an AeroDataBox key the times include delays and
-// the status follows the flight until it lands (live_flight, refreshed by
+// gate, terminal and the weather at the destination. With an AeroDataBox
+// key the real schedule (airport-local times) is fetched as soon as the
+// flight appears - the calendar entry only identifies it - and the status
+// follows the flight from 6 hours before departure until it lands (live_flight, refreshed by
 // web_fetch.ino's flight_maintain()).
 //
 // The screen is only part of the swipe sequence while a flight is coming
@@ -10,7 +12,7 @@
 // it (and hides its page dot) the rest of the time. Like the other tabs,
 // this is concatenated into the main sketch, so no #include is needed.
 
-// FLIGHT_SCREEN_INDEX is defined next to SCREEN_COUNT in esp32_dashboard.ino.
+// FLIGHT_SCREEN_INDEX is defined next to SCREEN_COUNT in ESP32-4848S040.ino.
 
 static lv_obj_t *flight_number_lab = NULL;
 static lv_obj_t *flight_route_lab = NULL;
@@ -25,6 +27,7 @@ static lv_obj_t *flight_gate_val = NULL;
 static lv_obj_t *flight_terminal_val = NULL;
 static lv_obj_t *flight_title_lab = NULL;
 static lv_obj_t *flight_source_lab = NULL;
+static lv_obj_t *flight_dest_lab = NULL;
 
 static bool flight_live_for(const UpcomingEvent &fl)
 {
@@ -62,6 +65,14 @@ static void flight_format_clock(time_t t, char *buf, size_t n)
   strftime(buf, n, "%H:%M", &lt);
 }
 
+// "HH:MM" from an AeroDataBox airport-local "2026-10-12 14:05", else from
+// `fallback` in the dashboard's timezone.
+static void flight_local_clock(const char *local, time_t fallback, char *buf, size_t n)
+{
+  if (local && strlen(local) >= 16) snprintf(buf, n, "%.5s", local + 11);
+  else flight_format_clock(fallback, buf, n);
+}
+
 void flight_apply_to_ui()
 {
   if (!flight_number_lab) return;
@@ -83,7 +94,7 @@ void flight_apply_to_ui()
   if (!df_extract_flight_number(fl.title, number, sizeof(number))) snprintf(number, sizeof(number), "Flight");
   lv_label_set_text(flight_number_lab, number);
 
-  char from[4], to[4];
+  char from[4] = "", to[4] = "";
   if (df_extract_route(fl.title, from, to)) lv_label_set_text_fmt(flight_route_lab, "%s  " LV_SYMBOL_RIGHT "  %s", from, to);
   else lv_label_set_text(flight_route_lab, "");
 
@@ -91,15 +102,32 @@ void flight_apply_to_ui()
   time_t dep = live && f.dep_actual ? f.dep_actual : dep_sched;
   time_t arr = live ? (f.arr_actual ? f.arr_actual : f.arr_scheduled) : (fl.end > fl.start ? fl.end : 0);
 
+  // Departure date at the departure airport (AeroDataBox), else from the calendar.
   struct tm dt;
-  localtime_r(&dep, &dt);
+  int y, mo, d;
+  if (live && sscanf(f.dep_local, "%4d-%2d-%2d", &y, &mo, &d) == 3)
+  {
+    dt = {};
+    dt.tm_year = y - 1900;
+    dt.tm_mon = mo - 1;
+    dt.tm_mday = d;
+    dt.tm_hour = 12;
+    dt.tm_isdst = -1;
+    mktime(&dt); // fills tm_wday
+  }
+  else
+  {
+    localtime_r(&dep, &dt);
+  }
   char date[32];
   strftime(date, sizeof(date), "%A, %B %d", &dt);
   lv_label_set_text(flight_date_lab, date);
 
   // Status pill + headline: countdown before departure, then the live state.
-  const char *pill = live ? "On time" : "Scheduled";
-  lv_color_t pill_color = live ? COLOR_SUCCESS : COLOR_TEXT_MUTED;
+  // Days ahead the schedule is known but "on time" means little yet.
+  bool near = now >= dep - 6 * 3600; // FLIGHT_LIVE_BEFORE_S
+  const char *pill = live && near ? "On time" : "Scheduled";
+  lv_color_t pill_color = live && near ? COLOR_SUCCESS : COLOR_TEXT_MUTED;
   long delay_min = (live && f.dep_actual && f.dep_scheduled) ? (long)(f.dep_actual - f.dep_scheduled) / 60 : 0;
   char headline[48];
   if (now < dep)
@@ -115,7 +143,7 @@ void flight_apply_to_ui()
   if (live)
   {
     char arr_clock[8];
-    flight_format_clock(arr, arr_clock, sizeof(arr_clock));
+    flight_local_clock(f.arr_local, arr, arr_clock, sizeof(arr_clock));
     if (!strcmp(f.status, "Canceled") || !strcmp(f.status, "CanceledUncertain"))
     {
       pill = "Canceled";
@@ -156,21 +184,29 @@ void flight_apply_to_ui()
   lv_label_set_text(flight_countdown_lab, headline);
 
   char buf[16];
-  flight_format_clock(dep, buf, sizeof(buf));
+  flight_local_clock(live ? f.dep_local : NULL, dep, buf, sizeof(buf));
   lv_label_set_text(flight_dep_val, buf);
   lv_obj_set_style_text_color(flight_dep_val, delay_min >= 5 ? COLOR_WARNING : COLOR_PRIMARY, LV_PART_MAIN);
   if (delay_min >= 5)
   {
     char sched[8];
-    flight_format_clock(dep_sched, sched, sizeof(sched));
+    flight_local_clock(f.dep_sched_local, dep_sched, sched, sizeof(sched));
     lv_label_set_text_fmt(flight_dep_sched_lab, "was %s", sched);
   }
   else
   {
     lv_label_set_text(flight_dep_sched_lab, "");
   }
-  flight_format_clock(arr, buf, sizeof(buf));
+  if (arr || (live && f.arr_local[0])) flight_local_clock(live ? f.arr_local : NULL, arr, buf, sizeof(buf));
+  else snprintf(buf, sizeof(buf), "--");
   lv_label_set_text(flight_arr_val, buf);
+
+  // Current weather at the destination.
+  if (live && f.dest_valid)
+    lv_label_set_text_fmt(flight_dest_lab, "%s now: %.0f\xC2\xB0" "C, %s", f.arr_city[0] ? f.arr_city : to,
+                          f.dest_temp, wmo_weather_desc(f.dest_wcode));
+  else
+    lv_label_set_text(flight_dest_lab, "");
   lv_label_set_text(flight_gate_val, live && f.dep_gate[0] ? f.dep_gate : "--");
   lv_label_set_text(flight_terminal_val, live && f.dep_terminal[0] ? f.dep_terminal : "--");
 
@@ -181,12 +217,13 @@ void flight_apply_to_ui()
   {
     char upd[8];
     flight_format_clock(f.last_fetch, upd, sizeof(upd));
-    lv_label_set_text_fmt(flight_source_lab, "Live status by AeroDataBox, updated %s", upd);
+    if (near)
+      lv_label_set_text_fmt(flight_source_lab, "Live status by AeroDataBox, updated %s - local airport times", upd);
+    else
+      lv_label_set_text(flight_source_lab, "Schedule by AeroDataBox (local airport times) - live status starts 6 hours before departure");
   }
-  else if (fl.start - now > 6 * 3600) // FLIGHT_LIVE_BEFORE_S in web_fetch.ino, which compiles after this tab
-    lv_label_set_text(flight_source_lab, "Live status starts 6 hours before departure");
   else
-    lv_label_set_text(flight_source_lab, "Waiting for live status...");
+    lv_label_set_text(flight_source_lab, "Times from your calendar - waiting for AeroDataBox...");
 }
 
 // Redraws the screen and keeps the page dots in sync with whether the
@@ -261,6 +298,15 @@ lv_obj_t *create_flight_screen()
   lv_obj_set_style_text_align(flight_dep_sched_lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_align(flight_dep_sched_lab, LV_ALIGN_TOP_LEFT, 20, 318);
 
+  flight_dest_lab = lv_label_create(scr);
+  lv_label_set_text(flight_dest_lab, "");
+  lv_obj_set_style_text_color(flight_dest_lab, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_set_style_text_font(flight_dest_lab, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_width(flight_dest_lab, 420);
+  lv_obj_set_style_text_align(flight_dest_lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_label_set_long_mode(flight_dest_lab, LV_LABEL_LONG_DOT);
+  lv_obj_align(flight_dest_lab, LV_ALIGN_TOP_MID, 0, 334);
+
   flight_title_lab = lv_label_create(scr);
   lv_label_set_text(flight_title_lab, "");
   lv_obj_set_style_text_color(flight_title_lab, lv_color_hex(0xE8EDF2), LV_PART_MAIN);
@@ -268,7 +314,7 @@ lv_obj_t *create_flight_screen()
   lv_obj_set_width(flight_title_lab, 420);
   lv_obj_set_style_text_align(flight_title_lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_long_mode(flight_title_lab, LV_LABEL_LONG_DOT);
-  lv_obj_align(flight_title_lab, LV_ALIGN_TOP_MID, 0, 350);
+  lv_obj_align(flight_title_lab, LV_ALIGN_TOP_MID, 0, 362);
 
   flight_source_lab = lv_label_create(scr);
   lv_label_set_text(flight_source_lab, "");
@@ -277,7 +323,7 @@ lv_obj_t *create_flight_screen()
   lv_obj_set_width(flight_source_lab, 420);
   lv_obj_set_style_text_align(flight_source_lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_long_mode(flight_source_lab, LV_LABEL_LONG_WRAP);
-  lv_obj_align(flight_source_lab, LV_ALIGN_TOP_MID, 0, 380);
+  lv_obj_align(flight_source_lab, LV_ALIGN_TOP_MID, 0, 386);
 
   return scr;
 }

@@ -1,7 +1,7 @@
 // ==================== Screen 4: Calendar ====================
-// Split out of esp32_dashboard.ino. Renders the real current month (via the
+// Split out of ESP32-4848S040.ino. Renders the real current month (via the
 // same NTP sync that drives the Home screen clock - see demo_year/mon/mday
-// in esp32_dashboard.ino) and overlays which days have events. Filled dot =
+// in ESP32-4848S040.ino) and overlays which days have events. Filled dot =
 // event day, ringed dot = today, ringed+filled = today with an event.
 //
 // The events come from up to 3 iCal (.ics) feeds the ESP32 downloads and
@@ -21,7 +21,7 @@
 // This is an Arduino multi-tab sketch: all .ino files in this folder are
 // concatenated into one translation unit at build time, so no #include of
 // this file is needed - create_calendar_screen() is called directly from
-// setup() in esp32_dashboard.ino, and calendar_apply_to_ui() is called from
+// setup() in ESP32-4848S040.ino, and calendar_apply_to_ui() is called from
 // loop() there whenever calendar_needs_ui_refresh is set (by either a fresh
 // NTP sync or a fresh calendar fetch).
 
@@ -288,8 +288,8 @@ void update_home_next_event()
 // Not part of screens[]/the swipeable set - reached only by tapping a day
 // on the Calendar screen, exited only via its own back button. Same
 // "separate screen outside the main array" shape as Settings (see
-// open_settings_cb()/close_settings_screen() in esp32_dashboard.ino).
-// cal_day_screen itself is declared in esp32_dashboard.ino alongside
+// open_settings_cb()/close_settings_screen() in ESP32-4848S040.ino).
+// cal_day_screen itself is declared in ESP32-4848S040.ino alongside
 // settings_screen, not here - setup() (which assigns to it) lives in that
 // file, concatenated before this one, and a plain variable (unlike a
 // function) has to already be declared at its first use in the

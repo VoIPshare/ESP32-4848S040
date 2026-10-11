@@ -67,9 +67,14 @@ bool df_fetch_tracking(const char *api_key, TrackingItem *out, int max, int *cou
 // Removes parcels delivered more than a day ago. Returns the new count.
 int df_tracking_drop_expired(TrackingItem *items, int count);
 
-// Live status of `f->number` (departing at f->cal_start) from AeroDataBox
-// via RapidAPI. Fills the status fields and sets f->valid on success.
+// Schedule and live status of `f->number` (departing on the local date of
+// f->cal_start) from AeroDataBox via RapidAPI: times (UTC and airport-local),
+// gate, terminal, cities and the arrival airport's location. Sets f->valid
+// on success.
 bool df_fetch_flight(const char *api_key, LiveFlight *f);
+
+// Current temperature and WMO weather code at a location (Open-Meteo).
+bool df_fetch_current_weather(float lat, float lon, float *temp, int *wcode);
 
 // True for calendar titles that look like a flight: "TS399 PUJ->YUL",
 // "AC 871 YUL to YYZ", "Flight to Toronto (AC 871)".
