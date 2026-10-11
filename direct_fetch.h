@@ -25,6 +25,9 @@ struct DfQuote
   float prev_close;
 };
 
+#define MW_TOP_DESIGNS 3
+#define MW_TITLE_MAX 48
+
 struct DfMakerWorld
 {
   long likes;
@@ -32,6 +35,19 @@ struct DfMakerWorld
   long prints;
   long collections;
   long boosts;
+  int designs;
+  // Most downloaded designs, best first (count = how many are filled).
+  int top_count;
+  char top_title[MW_TOP_DESIGNS][MW_TITLE_MAX];
+  long top_downloads[MW_TOP_DESIGNS];
+  long top_likes[MW_TOP_DESIGNS];
+};
+
+// Public profile counters of a MakerWorld user (no login needed).
+struct DfMakerWorldProfile
+{
+  long followers;
+  int level;
 };
 
 // One parcel from the PKGE account.
@@ -54,6 +70,8 @@ bool df_fetch_stocks(const char *symbols, DfQuote *out, int max, int *count, int
 // Sum of likes/downloads/prints/collections/boosts over every published
 // design of a MakerWorld user. Streams the ~1 MB answer through a filter.
 bool df_fetch_makerworld(const char *uid, DfMakerWorld *out);
+// Followers and level from the public profile.
+bool df_fetch_makerworld_profile(const char *uid, DfMakerWorldProfile *out);
 
 // Up to ICS_MAX_FEEDS iCal (.ics) feeds merged into one month. Times are
 // interpreted in the current TZ (set by configTzTime()). `out` is a staging

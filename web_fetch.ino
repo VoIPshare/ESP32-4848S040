@@ -125,20 +125,34 @@ void fetch_makerworld()
     return;
   }
 
-  DfMakerWorld mw;
+  static DfMakerWorld mw; // ~250 bytes of titles - kept off the task stack
   bool ok = df_fetch_makerworld(settings.makerworld_uid, &mw);
+  DfMakerWorldProfile profile;
+  bool profile_ok = ok && df_fetch_makerworld_profile(settings.makerworld_uid, &profile);
 
   data_lock();
   makerworld_fetch_attempted = true;
   // A failed fetch keeps the previous totals on screen.
   if (ok)
   {
-    makerworld_stats.likes = mw.likes;
-    makerworld_stats.downloads = mw.downloads;
-    makerworld_stats.prints = mw.prints;
-    makerworld_stats.collections = mw.collections;
-    makerworld_stats.boosts = mw.boosts;
-    makerworld_stats.valid = true;
+    MakerWorldStats &s = makerworld_stats;
+    s.counter[MW_LIKES] = mw.likes;
+    s.counter[MW_DOWNLOADS] = mw.downloads;
+    s.counter[MW_PRINTS] = mw.prints;
+    s.counter[MW_COLLECTIONS] = mw.collections;
+    s.counter[MW_BOOSTS] = mw.boosts;
+    s.designs = mw.designs;
+    s.top_count = mw.top_count;
+    memcpy(s.top_title, mw.top_title, sizeof(s.top_title));
+    memcpy(s.top_downloads, mw.top_downloads, sizeof(s.top_downloads));
+    memcpy(s.top_likes, mw.top_likes, sizeof(s.top_likes));
+    if (profile_ok)
+    {
+      s.followers = profile.followers;
+      s.level = profile.level;
+    }
+    makerworld_update_today();
+    s.valid = true;
   }
   data_unlock();
   makerworld_needs_ui_refresh = true;

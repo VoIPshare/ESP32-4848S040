@@ -452,7 +452,8 @@ lv_obj_t *create_calendar_screen()
   const lv_coord_t grid_x = 16;
   const lv_coord_t grid_top = 70;
   const lv_coord_t cell_w = 64;
-  const lv_coord_t cell_h = 58;
+  const lv_coord_t cell_h = 56;
+  const lv_coord_t first_row_cy = grid_top + 44; // ~10px clear of the M T W T F S S row
 
   for (int c = 0; c < 7; c++)
   {
@@ -472,7 +473,7 @@ lv_obj_t *create_calendar_screen()
   {
     int row = i / 7, col = i % 7;
     lv_coord_t cx = grid_x + col * cell_w + cell_w / 2;
-    lv_coord_t cy = grid_top + 34 + row * cell_h;
+    lv_coord_t cy = first_row_cy + row * cell_h;
 
     lv_obj_t *marker = lv_obj_create(scr);
     lv_obj_set_size(marker, 34, 34);
@@ -499,7 +500,7 @@ lv_obj_t *create_calendar_screen()
     // (cal_cell_day[i] == -1) rather than needing this toggled per month.
     lv_obj_t *touch = lv_obj_create(scr);
     lv_obj_set_size(touch, cell_w, cell_h);
-    lv_obj_set_pos(touch, grid_x + col * cell_w, grid_top + row * cell_h);
+    lv_obj_set_pos(touch, grid_x + col * cell_w, cy - cell_h / 2);
     lv_obj_set_style_bg_opa(touch, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(touch, 0, LV_PART_MAIN);
     lv_obj_clear_flag(touch, LV_OBJ_FLAG_SCROLLABLE);

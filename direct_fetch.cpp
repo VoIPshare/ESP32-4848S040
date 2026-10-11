@@ -293,6 +293,21 @@ bool df_fetch_stocks(const char *symbols, DfQuote *out, int max, int *count, int
 
 // ----------------------- MakerWorld (Bambu API) -----------------------
 
+// Copies a UTF-8 string, cut at a character boundary so a multi-byte
+// character is never split.
+static void utf8_copy(char *dst, const char *src, size_t n)
+{
+  size_t len = strlen(src);
+  if (len >= n)
+  {
+    len = n - 1;
+    while (len > 0 && (src[len] & 0xC0) == 0x80) len--; // back to the start of that character
+  }
+  memcpy(dst, src, len);
+  dst[len] = '\0';
+  while (len > 0 && dst[len - 1] == ' ') dst[--len] = '\0';
+}
+
 bool df_fetch_makerworld(const char *uid, DfMakerWorld *out)
 {
   if (!uid || uid[0] == '\0') return false;
@@ -325,6 +340,7 @@ bool df_fetch_makerworld(const char *uid, DfMakerWorld *out)
   f["printCount"] = true;
   f["collectionCount"] = true;
   f["boostCnt"] = true;
+  f["title"] = true;
 
   PatientStreamReader *reader = new (std::nothrow) PatientStreamReader(http.getStreamPtr());
   if (!reader) { http.end(); return false; }
@@ -350,14 +366,67 @@ bool df_fetch_makerworld(const char *uid, DfMakerWorld *out)
   *out = {};
   for (JsonObject h : hits)
   {
-    out->likes += h["likeCount"] | 0L;
-    out->downloads += h["downloadCount"] | 0L;
+    long downloads = h["downloadCount"] | 0L;
+    long likes = h["likeCount"] | 0L;
+    out->likes += likes;
+    out->downloads += downloads;
     out->prints += h["printCount"] | 0L;
     out->collections += h["collectionCount"] | 0L;
     out->boosts += h["boostCnt"] | 0L;
+    out->designs++;
+
+    // Insertion into the top list, most downloaded first.
+    int pos = out->top_count;
+    while (pos > 0 && out->top_downloads[pos - 1] < downloads) pos--;
+    if (pos >= MW_TOP_DESIGNS) continue;
+    int last = out->top_count < MW_TOP_DESIGNS ? out->top_count : MW_TOP_DESIGNS - 1;
+    for (int i = last; i > pos; i--)
+    {
+      memcpy(out->top_title[i], out->top_title[i - 1], MW_TITLE_MAX);
+      out->top_downloads[i] = out->top_downloads[i - 1];
+      out->top_likes[i] = out->top_likes[i - 1];
+    }
+    utf8_copy(out->top_title[pos], h["title"] | "", MW_TITLE_MAX);
+    out->top_downloads[pos] = downloads;
+    out->top_likes[pos] = likes;
+    if (out->top_count < MW_TOP_DESIGNS) out->top_count++;
   }
   Serial.printf("[MakerWorld] %u designs in %lu ms: likes %ld downloads %ld prints %ld boosts %ld\n",
                 (unsigned)hits.size(), millis() - t0, out->likes, out->downloads, out->prints, out->boosts);
+  return true;
+}
+
+bool df_fetch_makerworld_profile(const char *uid, DfMakerWorldProfile *out)
+{
+  if (!uid || uid[0] == '\0') return false;
+  char url[128];
+  snprintf(url, sizeof(url), "https://api.bambulab.com/v1/user-service/user/profile/%s", uid);
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.useHTTP10(true);
+  http.setTimeout(15000);
+  if (!http.begin(client, url)) return false;
+  http.setUserAgent(DF_USER_AGENT);
+  int code = http.GET();
+  if (code != 200)
+  {
+    Serial.printf("[MakerWorld] profile HTTP %d\n", code);
+    http.end();
+    return false;
+  }
+
+  JsonDocument filter;
+  filter["fanCount"] = true;
+  filter["personal"]["userLevel"]["level"] = true;
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
+  if (err) return false;
+
+  out->followers = doc["fanCount"] | 0L;
+  out->level = doc["personal"]["userLevel"]["level"] | 0;
   return true;
 }
 

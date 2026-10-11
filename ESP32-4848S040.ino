@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.3"
+#define FW_VERSION "3.4"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -55,10 +55,12 @@ enum WeatherIconType { WICON_CLEAR, WICON_PARTLY_CLOUDY, WICON_CLOUDY, WICON_FOG
 // the clock and the weather temperature - see lv_font_roboto_regular_86.c.
 extern "C" {
 extern const lv_font_t lv_font_roboto_regular_86;
+// Bigger, bold digits-and-colon-only Roboto for the Home clock.
+extern const lv_font_t lv_font_roboto_bold_136;
 // Home screen shortcut icons (Material Design Icons) - see home_icons.c /
 // tools/make_home_icons.py.
 extern const lv_img_dsc_t home_icon_home, home_icon_printer, home_icon_calendar, home_icon_server, home_icon_stocks,
-    home_icon_makerworld, home_icon_package, home_icon_flight;
+    home_icon_makerworld, home_icon_package, home_icon_flight, home_icon_pin;
 }
 
 #define GFX_BL 38
@@ -150,6 +152,7 @@ static lv_obj_t *home_next_event_lab = NULL; // "Next: ..." strip - populated by
 static lv_obj_t *home_next_accent = NULL;    // its accent bar - orange while a flight is pinned there
 static lv_obj_t *home_flight_btn = NULL;     // shortcut to the Flight screen, only while it's available
 static lv_obj_t *home_shortcuts_row = NULL;   // icons on Home itself ("always on Home" mode)
+static lv_obj_t *home_time_row = NULL;        // the clock - moves down a bit to clear that icon row
 // Jump menu: a tap on the top-left corner of any screen opens a card with
 // one icon per screen (see create_nav_menu()); it closes after 10 s, on a
 // choice, or on a tap outside it.
@@ -191,8 +194,8 @@ static bool in_calendar_day = false; // true while the Calendar day-detail scree
 static bool bambu_screen_auto_opened = false;
 static uint32_t bambu_auto_return_home_at_ms = 0; // 0 = not scheduled
 
-// Screen pin: hold the bottom-left corner 3s to toggle (see create_pin_hotspot()
-// and pin_hotspot_event_cb()). While pinned, swipe navigation, the Home
+// Screen pin: hold the top-left corner 3s to toggle (see pin_hold_event(),
+// pin icon from create_pin_hotspot()). While pinned, swipe navigation, the Home
 // badge's jump-to-Bambu, the print-start auto-navigate, and both auto-return
 // timers above are all suppressed - the visible screen just stays put.
 static lv_obj_t *pin_hotspot = NULL;
@@ -214,6 +217,14 @@ static bool screen_pinned = false;
 // LVGL-thread rule.
 static lv_obj_t *wifi_bars[4] = {NULL, NULL, NULL, NULL};
 static lv_obj_t *wifi_no_signal_line = NULL;
+static lv_obj_t *wifi_signal_box = NULL;
+// Auto-hide (settings.wifi_icon_autohide): the icon shows only on Home, for
+// WIFI_ICON_SHOW_MS after arriving there (or after the connection state
+// changes); while disconnected it stays up on Home. See
+// wifi_indicator_update_visibility().
+#define WIFI_ICON_SHOW_MS (20UL * 1000UL)
+static uint32_t wifi_icon_until_ms = 0;
+void wifi_indicator_update_visibility();
 
 // Home screen print-status badge (see create_home_screen()) + the state
 // needed to detect a RUNNING->FINISH transition and time out the "finished"
@@ -337,6 +348,7 @@ struct DeviceSettings
   char aerodatabox_key[96] = ""; // RapidAPI key for AeroDataBox (live flight status, optional)
   uint8_t idle_return_home_min = 5; // one of IDLE_TIMEOUT_OPTIONS_MIN - see create_settings_screen()
   bool flight_alert = true; // show the Flight screen for 2 min when the flight's data changes
+  bool wifi_icon_autohide = true; // Wi-Fi icon only on Home, for 20 s - see wifi_indicator_update_visibility()
   uint8_t home_shortcuts = SHORTCUTS_ON_TAP; // SHORTCUTS_ALWAYS (icons on Home) / _ON_TAP (top-left menu) / _OFF
   // Proxmox VE cluster - see proxmox.ino. host is "ip-or-hostname:port"
   // (default port 8006); token_id is the full "user@realm!tokenname" from
@@ -372,6 +384,8 @@ void clock_tick_cb(lv_timer_t *timer)
     update_home_next_event();
     flight_refresh_screen();
   }
+
+  wifi_indicator_update_visibility();
 
   // Auto-hide the page-position dots after a minute of no touch activity.
   if (page_dots_row && !lv_obj_has_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN) &&
@@ -557,10 +571,8 @@ void go_to_screen_blackout(uint8_t target)
   lv_timer_set_repeat_count(t, 1);
 }
 
-// Short tap on the top-right hotspot (the same one that opens Settings on a
-// 5s hold - see create_settings_hotspot()): next screen, like a left swipe.
-// SHORT_CLICKED isn't sent after a long press, so opening Settings never
-// also flips the page.
+// Tap on the bottom-right hotspot (see create_next_hotspot()): next screen,
+// like a left swipe. The top-right corner only opens Settings (5s hold).
 void corner_tap_next_screen_cb(lv_event_t *e)
 {
   if (screen_pinned || in_settings || in_calendar_day) return;
@@ -594,8 +606,10 @@ void nav_shortcuts_apply_mode()
 {
   bool always = settings.home_shortcuts == SHORTCUTS_ALWAYS;
   if (home_shortcuts_row) (always ? lv_obj_clear_flag : lv_obj_add_flag)(home_shortcuts_row, LV_OBJ_FLAG_HIDDEN);
-  bool corner = settings.home_shortcuts != SHORTCUTS_OFF && !in_settings;
-  if (nav_menu_hotspot) (corner ? lv_obj_clear_flag : lv_obj_add_flag)(nav_menu_hotspot, LV_OBJ_FLAG_HIDDEN);
+  // Clock center at y=82 (y=94 under the icon row); the divider is at y=150.
+  if (home_time_row) lv_obj_align(home_time_row, LV_ALIGN_CENTER, 0, always ? 4 : -8);
+  // Kept with shortcuts off too: the same corner toggles the screen pin.
+  if (nav_menu_hotspot) (in_settings ? lv_obj_add_flag : lv_obj_clear_flag)(nav_menu_hotspot, LV_OBJ_FLAG_HIDDEN);
 }
 
 void nav_menu_hide()
@@ -619,13 +633,16 @@ void nav_menu_show()
   nav_menu_until_ms = millis() + NAV_MENU_SHOW_MS;
 }
 
-// Top-left corner tap. On the Calendar day view that corner is its back
-// button, so it keeps working as one.
+// Top-left corner: a 3 s hold toggles the screen pin (see
+// pin_hold_event()), a tap opens the jump menu. On the Calendar day view
+// that corner is its back button, so a tap keeps working as one.
 void nav_menu_hotspot_cb(lv_event_t *e)
 {
+  if (pin_hold_event(e)) return;
+  if (lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED) return;
   if (in_settings) return;
   if (in_calendar_day) { close_calendar_day_screen(NULL); return; }
-  if (screen_pinned) return;
+  if (screen_pinned || settings.home_shortcuts == SHORTCUTS_OFF) return;
   if (nav_menu_until_ms) nav_menu_hide();
   else nav_menu_show();
 }
@@ -713,7 +730,7 @@ void create_nav_menu()
   lv_obj_set_style_border_width(nav_menu_hotspot, 0, LV_PART_MAIN);
   lv_obj_clear_flag(nav_menu_hotspot, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(nav_menu_hotspot, LV_OBJ_FLAG_GESTURE_BUBBLE);
-  lv_obj_add_event_cb(nav_menu_hotspot, nav_menu_hotspot_cb, LV_EVENT_SHORT_CLICKED, NULL);
+  lv_obj_add_event_cb(nav_menu_hotspot, nav_menu_hotspot_cb, LV_EVENT_ALL, NULL);
 
   nav_shortcuts_apply_mode();
 }
@@ -736,12 +753,14 @@ void proxmox_badge_clicked_cb(lv_event_t *e)
   go_to_screen_blackout(3);
 }
 
-// Long-press bottom-left corner (3s) to toggle screen_pinned - see
-// create_pin_hotspot(). Timed manually via PRESSED/PRESSING/RELEASED
+// Holding the top-left corner 3 s toggles screen_pinned (called from
+// nav_menu_hotspot_cb()). Timed manually via PRESSED/PRESSING/RELEASED
 // rather than the indev's built-in long_press_time, since that's already
 // set to 5s for the Settings hotspot (LVGL only supports one duration per
-// indev) and this needs a different, shorter hold.
-void pin_hotspot_event_cb(lv_event_t *e)
+// indev) and this needs a different, shorter hold. Returns true when the
+// event was part of the hold, so the caller ignores it - including the
+// SHORT_CLICKED that can follow a completed hold.
+bool pin_hold_event(lv_event_t *e)
 {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_PRESSED)
@@ -768,9 +787,15 @@ void pin_hotspot_event_cb(lv_event_t *e)
   }
   else if (code == LV_EVENT_SHORT_CLICKED)
   {
-    // A short tap (not the 3 s pin hold): previous screen.
-    if (!pin_press_fired) corner_tap_prev_screen();
+    return pin_press_fired;
   }
+  return false;
+}
+
+// Bottom-left corner tap: previous screen.
+void prev_hotspot_cb(lv_event_t *e)
+{
+  corner_tap_prev_screen();
 }
 
 void corner_tap_prev_screen()
@@ -1043,7 +1068,31 @@ void wifi_signal_apply_to_ui()
     lv_obj_set_style_bg_opa(wifi_bars[i], filled ? LV_OPA_COVER : LV_OPA_30, LV_PART_MAIN);
   }
 
-  if (wifi_no_signal_line) (wifi_signal_ui_connected ? lv_obj_add_flag : lv_obj_clear_flag)(wifi_no_signal_line, LV_OBJ_FLAG_HIDDEN);
+  // Connection came or went: show the icon again for a while (on Home).
+  static bool prev_connected = false;
+  if (wifi_signal_ui_connected != prev_connected)
+  {
+    prev_connected = wifi_signal_ui_connected;
+    wifi_icon_until_ms = millis() + WIFI_ICON_SHOW_MS;
+  }
+  wifi_indicator_update_visibility();
+}
+
+// Always visible with auto-hide off. With it on: only on Home, and there
+// only for WIFI_ICON_SHOW_MS after arriving (switch_screen()) or after the
+// connection changed - or for as long as Wi-Fi is down. Runs every second
+// from clock_tick_cb(), so it only touches the flags when they change.
+void wifi_indicator_update_visibility()
+{
+  if (!wifi_signal_box) return;
+  bool show = !settings.wifi_icon_autohide ||
+              (current_screen == 0 && !in_settings &&
+               (!wifi_signal_ui_connected || (wifi_icon_until_ms != 0 && (int32_t)(wifi_icon_until_ms - millis()) > 0)));
+  if (show == lv_obj_has_flag(wifi_signal_box, LV_OBJ_FLAG_HIDDEN))
+    (show ? lv_obj_clear_flag : lv_obj_add_flag)(wifi_signal_box, LV_OBJ_FLAG_HIDDEN);
+  bool strike = show && !wifi_signal_ui_connected;
+  if (wifi_no_signal_line && strike == lv_obj_has_flag(wifi_no_signal_line, LV_OBJ_FLAG_HIDDEN))
+    (strike ? lv_obj_clear_flag : lv_obj_add_flag)(wifi_no_signal_line, LV_OBJ_FLAG_HIDDEN);
 }
 
 // The weather location from the setup page, or - when it's empty - the
@@ -1182,6 +1231,7 @@ void load_settings()
   prefs.getString("adbkey", settings.aerodatabox_key, sizeof(settings.aerodatabox_key));
   settings.idle_return_home_min = prefs.getUChar("idlemin", settings.idle_return_home_min);
   settings.flight_alert = prefs.getBool("fltalert", settings.flight_alert);
+  settings.wifi_icon_autohide = prefs.getBool("wifihide", settings.wifi_icon_autohide);
   settings.home_shortcuts = prefs.getUChar("shortcuts", settings.home_shortcuts);
   prefs.getString("pxhost", settings.proxmox_host, sizeof(settings.proxmox_host));
   prefs.getString("pxtok", settings.proxmox_token_id, sizeof(settings.proxmox_token_id));
@@ -1210,6 +1260,7 @@ void save_settings()
   prefs.putString("adbkey", settings.aerodatabox_key);
   prefs.putUChar("idlemin", settings.idle_return_home_min);
   prefs.putBool("fltalert", settings.flight_alert);
+  prefs.putBool("wifihide", settings.wifi_icon_autohide);
   prefs.putUChar("shortcuts", settings.home_shortcuts);
   prefs.putString("pxhost", settings.proxmox_host);
   prefs.putString("pxtok", settings.proxmox_token_id);
@@ -1534,6 +1585,7 @@ static lv_obj_t *cal_day_screen; // Calendar day-detail screen - see calendar.in
 static lv_obj_t *ap_switch;
 static lv_obj_t *auto_bambu_switch;
 static lv_obj_t *flight_alert_switch;
+static lv_obj_t *wifi_autohide_switch;
 static lv_obj_t *ap_status_lab;
 static lv_obj_t *idle_timeout_dd;
 // Selectable idle-return-to-Home timeouts, in minutes - index into this
@@ -1611,6 +1663,14 @@ void flight_alert_switch_toggled_cb(lv_event_t *e)
 {
   settings.flight_alert = lv_obj_has_state(flight_alert_switch, LV_STATE_CHECKED);
   save_settings(); // on-device control, applies live immediately
+}
+
+void wifi_autohide_switch_toggled_cb(lv_event_t *e)
+{
+  settings.wifi_icon_autohide = lv_obj_has_state(wifi_autohide_switch, LV_STATE_CHECKED);
+  save_settings(); // on-device control, applies live immediately
+  wifi_icon_until_ms = millis() + WIFI_ICON_SHOW_MS;
+  wifi_indicator_update_visibility();
 }
 
 void auto_bambu_switch_toggled_cb(lv_event_t *e)
@@ -1773,6 +1833,7 @@ void open_settings_cb(lv_event_t *e)
   if (page_dots_row) lv_obj_add_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
   nav_menu_hide();
   nav_shortcuts_apply_mode();
+  wifi_indicator_update_visibility();
   lv_scr_load_anim(settings_screen, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
 }
 
@@ -2076,7 +2137,7 @@ lv_obj_t *create_home_screen()
   // lv_font_roboto_regular_86 replacement (adv_w 773 vs 863, line_height 63
   // vs 70 - see lv_font_roboto_regular_86.c / lv_font_roboto_bold_94.c).
   lv_obj_t *time_row = lv_obj_create(clock_panel);
-  lv_obj_set_size(time_row, 420, 90);
+  lv_obj_set_size(time_row, 460, 100);
   lv_obj_set_style_bg_opa(time_row, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(time_row, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(time_row, 0, LV_PART_MAIN);
@@ -2084,26 +2145,27 @@ lv_obj_t *create_home_screen()
   lv_obj_set_flex_flow(time_row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_set_style_pad_column(time_row, 0, LV_PART_MAIN);
-  lv_obj_align(time_row, LV_ALIGN_CENTER, 0, 2); // below the shortcut row
+  lv_obj_align(time_row, LV_ALIGN_CENTER, 0, -8);
+  home_time_row = time_row; // re-placed by nav_shortcuts_apply_mode(): higher when the Home icon row is off
 
   lv_obj_t *hour_val = lv_label_create(time_row);
-  lv_obj_set_width(hour_val, 117);
+  lv_obj_set_width(hour_val, 172);
   lv_obj_set_style_text_align(hour_val, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_text(hour_val, "14");
   lv_obj_set_style_text_color(hour_val, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(hour_val, &lv_font_roboto_regular_86, LV_PART_MAIN);
+  lv_obj_set_style_text_font(hour_val, &lv_font_roboto_bold_136, LV_PART_MAIN);
 
   lv_obj_t *colon_val = lv_label_create(time_row);
   lv_label_set_text(colon_val, ":");
   lv_obj_set_style_text_color(colon_val, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(colon_val, &lv_font_roboto_regular_86, LV_PART_MAIN);
+  lv_obj_set_style_text_font(colon_val, &lv_font_roboto_bold_136, LV_PART_MAIN);
 
   lv_obj_t *min_val = lv_label_create(time_row);
-  lv_obj_set_width(min_val, 117);
+  lv_obj_set_width(min_val, 172);
   lv_obj_set_style_text_align(min_val, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_text(min_val, "32");
   lv_obj_set_style_text_color(min_val, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(min_val, &lv_font_roboto_regular_86, LV_PART_MAIN);
+  lv_obj_set_style_text_font(min_val, &lv_font_roboto_bold_136, LV_PART_MAIN);
 
   home_hour_label = hour_val;
   home_min_label = min_val;
@@ -2113,14 +2175,14 @@ lv_obj_t *create_home_screen()
   lv_obj_set_style_bg_color(divider, COLOR_PRIMARY, LV_PART_MAIN);
   lv_obj_set_style_border_width(divider, 0, LV_PART_MAIN);
   lv_obj_set_style_radius(divider, 2, LV_PART_MAIN);
-  lv_obj_align(divider, LV_ALIGN_CENTER, 0, 57);
+  lv_obj_align(divider, LV_ALIGN_CENTER, 0, 60);
   lv_obj_clear_flag(divider, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t *date_val = lv_label_create(clock_panel);
   lv_label_set_text(date_val, "Saturday, August 15"); // placeholder until clock_apply_to_ui() runs post-NTP-sync
   lv_obj_set_style_text_color(date_val, lv_color_hex(0xB0BEC5), LV_PART_MAIN);
   lv_obj_set_style_text_font(date_val, &lv_font_montserrat_18, LV_PART_MAIN);
-  lv_obj_align(date_val, LV_ALIGN_CENTER, 0, 77);
+  lv_obj_align(date_val, LV_ALIGN_CENTER, 0, 78);
   home_date_label = date_val;
 
   // Shortcut row ("always on Home" mode): one icon per screen, centered
@@ -2196,7 +2258,7 @@ lv_obj_t *create_home_screen()
   lv_label_set_text(extra, "");
   lv_obj_set_style_text_color(extra, lv_color_hex(0xB0BEC5), LV_PART_MAIN);
   lv_obj_set_style_text_font(extra, &lv_font_montserrat_16, LV_PART_MAIN);
-  lv_obj_align(extra, LV_ALIGN_TOP_RIGHT, -24, 92);
+  lv_obj_align(extra, LV_ALIGN_TOP_RIGHT, -24, 104); // clear gap under the big temperature
   weather_extra_lab = extra;
 
   // The condition ("Overcast", "Rain", ...) belongs to the icon: centered under it.
@@ -2365,10 +2427,33 @@ lv_obj_t *create_settings_screen()
   if (settings.flight_alert) lv_obj_add_state(flight_alert_switch, LV_STATE_CHECKED);
   lv_obj_add_event_cb(flight_alert_switch, flight_alert_switch_toggled_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
+  // ---- Wi-Fi icon: only on Home for 20 s, or always ----
+  lv_obj_t *wifi_row = lv_obj_create(scr);
+  lv_obj_set_size(wifi_row, 432, 54);
+  lv_obj_align(wifi_row, LV_ALIGN_TOP_LEFT, 0, 254);
+  lv_obj_set_style_bg_color(wifi_row, COLOR_BG_LIGHT, LV_PART_MAIN);
+  lv_obj_set_style_border_width(wifi_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(wifi_row, 16, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(wifi_row, 16, LV_PART_MAIN);
+  lv_obj_clear_flag(wifi_row, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *wifi_title = lv_label_create(wifi_row);
+  lv_label_set_text(wifi_title, "Auto-hide Wi-Fi icon (Home, 20 s)");
+  lv_obj_set_style_text_color(wifi_title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_set_style_text_font(wifi_title, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_align(wifi_title, LV_ALIGN_TOP_LEFT, 0, 0);
+  lv_obj_set_width(wifi_title, 340);
+
+  wifi_autohide_switch = lv_switch_create(wifi_row);
+  lv_obj_set_style_bg_color(wifi_autohide_switch, COLOR_PRIMARY, LV_PART_INDICATOR | LV_STATE_CHECKED);
+  lv_obj_align(wifi_autohide_switch, LV_ALIGN_TOP_RIGHT, 0, -4);
+  if (settings.wifi_icon_autohide) lv_obj_add_state(wifi_autohide_switch, LV_STATE_CHECKED);
+  lv_obj_add_event_cb(wifi_autohide_switch, wifi_autohide_switch_toggled_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
   // ---- Idle return-to-Home timeout ----
   lv_obj_t *idle_row = lv_obj_create(scr);
   lv_obj_set_size(idle_row, 432, 54);
-  lv_obj_align(idle_row, LV_ALIGN_TOP_LEFT, 0, 254);
+  lv_obj_align(idle_row, LV_ALIGN_TOP_LEFT, 0, 316);
   lv_obj_set_style_bg_color(idle_row, COLOR_BG_LIGHT, LV_PART_MAIN);
   lv_obj_set_style_border_width(idle_row, 0, LV_PART_MAIN);
   lv_obj_set_style_radius(idle_row, 16, LV_PART_MAIN);
@@ -2388,23 +2473,23 @@ lv_obj_t *create_settings_screen()
   lv_dropdown_set_selected(idle_timeout_dd, idle_timeout_min_to_index(settings.idle_return_home_min));
   lv_obj_add_event_cb(idle_timeout_dd, idle_timeout_dd_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-  // ---- Restart device ----
+  // ---- Restart device (bottom row, left of Close) ----
   lv_obj_t *restart_btn = lv_btn_create(scr);
-  lv_obj_set_size(restart_btn, 432, 44);
-  lv_obj_align(restart_btn, LV_ALIGN_TOP_LEFT, 0, 318);
+  lv_obj_set_size(restart_btn, 212, 48);
+  lv_obj_align(restart_btn, LV_ALIGN_BOTTOM_LEFT, 0, 0);
   lv_obj_set_style_bg_color(restart_btn, lv_color_hex(0xEF5350), LV_PART_MAIN);
   lv_obj_set_style_radius(restart_btn, 12, LV_PART_MAIN);
   lv_obj_add_event_cb(restart_btn, restart_btn_clicked_cb, LV_EVENT_CLICKED, NULL);
 
   lv_obj_t *restart_lab = lv_label_create(restart_btn);
-  lv_label_set_text(restart_lab, "Restart Device");
+  lv_label_set_text(restart_lab, "Restart");
   lv_obj_center(restart_lab);
 
   // ---- Close: the AP toggle above already applies live, so this is the
   // only exit - it turns the AP off and connects to the configured Wi-Fi.
   lv_obj_t *close_btn = lv_btn_create(scr);
-  lv_obj_set_size(close_btn, 432, 48);
-  lv_obj_align(close_btn, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_obj_set_size(close_btn, 212, 48);
+  lv_obj_align(close_btn, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
   lv_obj_set_style_bg_color(close_btn, COLOR_PRIMARY, LV_PART_MAIN);
   lv_obj_set_style_radius(close_btn, 12, LV_PART_MAIN);
   lv_obj_add_event_cb(close_btn, settings_close_cb, LV_EVENT_CLICKED, NULL);
@@ -2449,8 +2534,8 @@ void create_page_indicator()
 }
 
 // Invisible top-right hotspot on the always-on-top layer. Long-pressing it
-// (5s, configured on the touch indev in setup()) opens the settings screen;
-// a short tap moves to the next screen.
+// (5s, configured on the touch indev in setup()) opens the settings screen.
+// A short tap does nothing - next page is only the bottom-right corner.
 void create_settings_hotspot()
 {
   lv_obj_t *layer = lv_disp_get_layer_top(NULL);
@@ -2461,16 +2546,12 @@ void create_settings_hotspot()
   lv_obj_set_style_border_width(hotspot, 0, LV_PART_MAIN);
   lv_obj_clear_flag(hotspot, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(hotspot, open_settings_cb, LV_EVENT_LONG_PRESSED, NULL);
-  lv_obj_add_event_cb(hotspot, corner_tap_next_screen_cb, LV_EVENT_SHORT_CLICKED, NULL);
 }
 
-// Invisible bottom-left hotspot on the always-on-top layer, mirroring
-// create_settings_hotspot() above (moved off top-left so it no longer
-// covers the Calendar day-detail screen's back button there - see
-// calendar.ino's create_calendar_day_screen()). Holding it 3s toggles
-// screen_pinned (see pin_hotspot_event_cb() for why this is timed
-// manually instead of via long_press_time). Also builds the small red
-// "PINNED" pill shown top-center while pinned.
+// Invisible bottom-left hotspot on the always-on-top layer: a tap goes to
+// the previous screen (mirrors create_next_hotspot()). Also builds the pin
+// icon shown top-left while the screen is pinned - the pin itself is
+// toggled by holding the top-left corner 3 s (see pin_hold_event()).
 void create_pin_hotspot()
 {
   lv_obj_t *layer = lv_disp_get_layer_top(NULL);
@@ -2480,18 +2561,15 @@ void create_pin_hotspot()
   lv_obj_set_style_bg_opa(pin_hotspot, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(pin_hotspot, 0, LV_PART_MAIN);
   lv_obj_clear_flag(pin_hotspot, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_event_cb(pin_hotspot, pin_hotspot_event_cb, LV_EVENT_ALL, NULL);
+  lv_obj_add_event_cb(pin_hotspot, prev_hotspot_cb, LV_EVENT_SHORT_CLICKED, NULL);
 
-  pin_indicator = lv_label_create(layer);
-  lv_label_set_text(pin_indicator, "PINNED");
-  lv_obj_set_style_text_color(pin_indicator, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_bg_color(pin_indicator, lv_color_hex(0xEF5350), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(pin_indicator, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_pad_hor(pin_indicator, 12, LV_PART_MAIN);
-  lv_obj_set_style_pad_ver(pin_indicator, 4, LV_PART_MAIN);
-  lv_obj_set_style_radius(pin_indicator, 10, LV_PART_MAIN);
+  // Not clickable, so taps fall through to the top-left hotspot under it.
+  pin_indicator = lv_img_create(layer);
+  lv_img_set_src(pin_indicator, &home_icon_pin);
+  lv_obj_set_style_img_recolor(pin_indicator, lv_color_hex(0xEF5350), LV_PART_MAIN);
+  lv_obj_set_style_img_recolor_opa(pin_indicator, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_clear_flag(pin_indicator, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_align(pin_indicator, LV_ALIGN_TOP_MID, 0, 6);
+  lv_obj_align(pin_indicator, LV_ALIGN_TOP_LEFT, 10, 8);
   lv_obj_add_flag(pin_indicator, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -2546,6 +2624,9 @@ void create_wifi_signal_indicator()
   lv_obj_set_style_line_rounded(strike, true, LV_PART_MAIN);
   lv_obj_clear_flag(strike, LV_OBJ_FLAG_CLICKABLE);
   wifi_no_signal_line = strike;
+  wifi_signal_box = box;
+  wifi_icon_until_ms = millis() + WIFI_ICON_SHOW_MS; // boot starts on Home
+  wifi_indicator_update_visibility();
 }
 
 // See blackout_overlay above screen_gesture_cb: opaque, never animated.
@@ -2577,6 +2658,8 @@ void switch_screen(uint8_t num, lv_scr_load_anim_t anim)
   // keeps showing the old screen until that "animation" completes.
   lv_scr_load_anim(screens[num], anim, 0, 0, false);
   current_screen = num;
+  if (num == 0) wifi_icon_until_ms = millis() + WIFI_ICON_SHOW_MS; // back on Home: show the Wi-Fi icon again for a while
+  wifi_indicator_update_visibility();
   update_page_indicator(num);
   nav_shortcuts_apply_mode(); // the menu corner is free on Home in "always on Home" mode
 }

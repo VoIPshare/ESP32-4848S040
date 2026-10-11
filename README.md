@@ -96,13 +96,14 @@ If you'd rather stay on LVGL 9.5+, you'll need to update the sketch's display-in
 
 | Where | Tap | Hold |
 | --- | --- | --- |
-| Bottom-left corner | previous screen | 3 s: pin / unpin the current screen |
+| Bottom-left corner | previous screen | |
 | Bottom-right corner | next screen | |
-| Top-left corner | jump menu: one icon per screen, including Home | |
-| Top-right corner | next screen | 5 s: Settings |
+| Top-left corner | jump menu: one icon per screen, including Home | 3 s: pin / unpin the current screen |
+| Top-right corner | | 5 s: Settings |
 | Anywhere | swipe left/right to change screen | |
 
-- **Pinned** (a "PINNED" badge at the top): the screen stays put. Swipes, corner taps, the jump menu, automatic returns to Home and automatic screen changes (print start, flight changes) are all paused until you hold the bottom-left corner again.
+- **Pinned** (a red pin icon top-left): the screen stays put. Swipes, corner taps, the jump menu, automatic returns to Home and automatic screen changes (print start, flight changes) are all paused until you hold the top-left corner again.
+- The Wi-Fi icon (top-right) shows only on Home, for 20 seconds after you get there or after the connection changes, and stays while Wi-Fi is down. Turn **Auto-hide Wi-Fi icon** off in Settings to always show it on every screen.
 - The jump menu closes after 10 seconds or on a tap outside it. On the Calendar day view the top-left corner is its back button.
 - With "Always on Home" (setup page), the icons also stay on Home, right of the menu corner.
 
@@ -115,7 +116,7 @@ Use the corners or swipe left/right to move between them (see [Navigation](#navi
 3. **Calendar**: the current month with event days marked; tap a day for its events
 4. **Proxmox cluster**: up to 3 nodes with status, CPU, RAM, disk and uptime
 5. **Stocks**: up to 7 quotes with daily change
-6. **MakerWorld**: likes, downloads, prints, collections and boosts
+6. **MakerWorld**: likes, downloads, prints, collections and boosts with today's growth, designs/followers/level, and the 3 most downloaded designs
 7. **Packages**: up to 5 PKGE parcels with status and estimated delivery
 8. **Flight**: only while a calendar flight is coming up or in progress
 

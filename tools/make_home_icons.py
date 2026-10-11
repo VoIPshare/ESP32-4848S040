@@ -19,6 +19,7 @@ ICONS = [  # (C name, MDI name, codepoint)
     ("home_icon_makerworld", "cube-outline", 0xF01A7),
     ("home_icon_package", "package-variant-closed", 0xF03D7),
     ("home_icon_flight", "airplane", 0xF001D),
+    ("home_icon_pin", "pin", 0xF0403),  # "screen pinned" indicator, top-left
 ]
 
 font = ImageFont.truetype(sys.argv[1], SIZE)
