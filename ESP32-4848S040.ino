@@ -1,12 +1,12 @@
 /*******************************************************************************
  * ESP32-4848S040 Multi-Screen Dashboard
- * LVGL 8.3.0 Compatible Version with ST7701S Support
+ * LVGL 8.4 (8.x API) with ST7701S Support
  * 480x480 Display with 7-8 Swipeable Screens
  ******************************************************************************/
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.4"
+#define FW_VERSION "3.5"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -387,9 +387,10 @@ void clock_tick_cb(lv_timer_t *timer)
 
   wifi_indicator_update_visibility();
 
-  // Auto-hide the page-position dots after a minute of no touch activity.
+  // Auto-hide the page-position dots after 10 s of no touch activity (a
+  // touch brings them back - see my_touchpad_read()).
   if (page_dots_row && !lv_obj_has_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN) &&
-      millis() - last_activity_ms > 60000)
+      millis() - last_activity_ms > 10000)
   {
     lv_obj_add_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
   }
