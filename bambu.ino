@@ -388,10 +388,10 @@ void bambu_apply_to_ui()
   // AND percent < 1 rules out "we just reconnected mid-print" (which would
   // otherwise look identical to a fresh start on the very first message
   // after a reboot, since bambu_prev_gcode_state starts empty either way).
-  // Suppressed while screen_locked, same as every other auto-navigate.
+  // Suppressed while screen_pinned, same as every other auto-navigate.
   bool now_printing_ish = strcmp(bambu.gcode_state, "RUNNING") == 0 || strcmp(bambu.gcode_state, "PREPARE") == 0;
   if (settings.auto_show_bambu_on_start && !was_printing_ish && now_printing_ish && bambu.percent < 1 &&
-      !in_settings && current_screen != 1 && !screen_locked)
+      !in_settings && current_screen != 1 && !screen_pinned)
   {
     go_to_screen_blackout(1);
     bambu_screen_auto_opened = true;

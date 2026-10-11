@@ -370,10 +370,10 @@ lv_obj_t *create_calendar_day_screen()
   lv_obj_set_style_pad_all(scr, 0, LV_PART_MAIN);
   lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-  // Top-left is clear here: the Settings hotspot is top-right and the lock
+  // Top-left is clear here: the Settings hotspot is top-right and the pin
   // hotspot is bottom-left (both 90x90, on the always-on-top LVGL layer,
   // above every screen's content - see create_settings_hotspot()/
-  // create_lock_hotspot()). A button placed under either would never
+  // create_pin_hotspot()). A button placed under either would never
   // receive the tap.
   lv_obj_t *back_btn = lv_btn_create(scr);
   lv_obj_set_size(back_btn, 60, 50);

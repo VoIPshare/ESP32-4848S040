@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "2.9"
+#define FW_VERSION "3.2"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -25,6 +25,7 @@
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
+#include <esp32s3/rom/cache.h> // Cache_WriteBack_Addr() - see my_disp_flush()
 #include "calendar_types.h"
 #include "direct_fetch.h"
 
@@ -56,7 +57,7 @@ extern "C" {
 extern const lv_font_t lv_font_roboto_regular_86;
 // Home screen shortcut icons (Material Design Icons) - see home_icons.c /
 // tools/make_home_icons.py.
-extern const lv_img_dsc_t home_icon_printer, home_icon_calendar, home_icon_server, home_icon_stocks,
+extern const lv_img_dsc_t home_icon_home, home_icon_printer, home_icon_calendar, home_icon_server, home_icon_stocks,
     home_icon_makerworld, home_icon_package, home_icon_flight;
 }
 
@@ -101,7 +102,8 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
     4 /* B0 */, 5 /* B1 */, 6 /* B2 */, 7 /* B3 */, 15 /* B4 */,
     1 /* hsync_polarity */, 10 /* hsync_front_porch */, 8 /* hsync_pulse_width */, 50 /* hsync_back_porch */,
     1 /* vsync_polarity */, 10 /* vsync_front_porch */, 8 /* vsync_pulse_width */, 20 /* vsync_back_porch */,
-    0 /* pclk_active_neg */, 12000000 /* prefer_speed */, false /* useBigEndian */,
+    0 /* pclk_active_neg */, 10000000 /* prefer_speed: 10 MHz (~35 fps) - was 12 MHz; less PSRAM bandwidth per
+                                            frame leaves more headroom for Wi-Fi/TLS, see rgb_resync.cpp */, false /* useBigEndian */,
     0 /* de_idle_high */, 0 /* pclk_idle_high */,
     480 * 40 /* bounce_buffer_size_px: reduce tearing on full-screen swaps - bumped from 480*10
                 since network activity (WiFi/TLS competing for PSRAM bandwidth) was starving the
@@ -109,6 +111,10 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
 Arduino_RGB_Display *gfx = new Arduino_RGB_Display(
     480 /* width */, 480 /* height */, rgbpanel, 0 /* rotation: library default - see my_touchpad_read() for the matching touch mapping */, true /* auto_flush */,
     bus, GFX_NOT_DEFINED /* RST */, st7701_type9_init_operations, sizeof(st7701_type9_init_operations));
+
+// Re-aligns the panel after a bounce-buffer underrun (see rgb_resync.cpp).
+void rgb_panel_resync(Arduino_ESP32RGBPanel *panel);
+#define RGB_RESYNC_INTERVAL_S 2
 
 /* Change to your screen resolution */
 static uint32_t screenWidth;
@@ -143,10 +149,16 @@ static lv_obj_t *home_date_label = NULL;
 static lv_obj_t *home_next_event_lab = NULL; // "Next: ..." strip - populated by calendar.ino's update_home_next_event()
 static lv_obj_t *home_next_accent = NULL;    // its accent bar - orange while a flight is pinned there
 static lv_obj_t *home_flight_btn = NULL;     // shortcut to the Flight screen, only while it's available
-static lv_obj_t *home_shortcuts_row = NULL;
-static lv_obj_t *home_shortcuts_hotspot = NULL; // top-left tap target in "show on corner tap" mode
-static uint32_t home_shortcuts_until_ms = 0;    // corner mode: hide the row again at this time
-#define HOME_SHORTCUTS_SHOW_MS (10UL * 1000UL)
+static lv_obj_t *home_shortcuts_row = NULL;   // icons on Home itself ("always on Home" mode)
+// Jump menu: a tap on the top-left corner of any screen opens a card with
+// one icon per screen (see create_nav_menu()); it closes after 10 s, on a
+// choice, or on a tap outside it.
+static lv_obj_t *nav_menu_hotspot = NULL;
+static lv_obj_t *nav_menu_backdrop = NULL;
+static lv_obj_t *nav_menu_card = NULL;
+static lv_obj_t *nav_menu_btn[SCREEN_COUNT] = {NULL};
+static uint32_t nav_menu_until_ms = 0;
+#define NAV_MENU_SHOW_MS (10UL * 1000UL)
 enum { SHORTCUTS_ALWAYS = 0, SHORTCUTS_ON_TAP = 1, SHORTCUTS_OFF = 2 };
 static uint8_t demo_hour = 14, demo_min = 32, demo_sec = 0;
 // Weekday/month/day-of-month, set from the same NTP sync that corrects
@@ -174,26 +186,26 @@ static bool in_calendar_day = false; // true while the Calendar day-detail scree
 // IDLE_TIMEOUT_OPTIONS_MIN/create_settings_screen()) - except while showing
 // the Bambu screen because a print just auto-opened it - that case instead
 // gets its own 5-min-after-finish return, and neither applies while
-// screen_locked.
+// screen_pinned.
 #define BAMBU_AUTO_FINISH_RETURN_MS (5UL * 60UL * 1000UL)
 static bool bambu_screen_auto_opened = false;
 static uint32_t bambu_auto_return_home_at_ms = 0; // 0 = not scheduled
 
-// Screen lock: hold the bottom-left corner 3s to toggle (see create_lock_hotspot()
-// and lock_hotspot_event_cb()). While locked, swipe navigation, the Home
+// Screen pin: hold the bottom-left corner 3s to toggle (see create_pin_hotspot()
+// and pin_hotspot_event_cb()). While pinned, swipe navigation, the Home
 // badge's jump-to-Bambu, the print-start auto-navigate, and both auto-return
 // timers above are all suppressed - the visible screen just stays put.
-static lv_obj_t *lock_hotspot = NULL;
-static lv_obj_t *lock_indicator = NULL;
-static uint32_t lock_press_start_ms = 0;
-static bool lock_press_fired = false;
-static bool screen_locked = false;
+static lv_obj_t *pin_hotspot = NULL;
+static lv_obj_t *pin_indicator = NULL;
+static uint32_t pin_press_start_ms = 0;
+static bool pin_press_fired = false;
+static bool screen_pinned = false;
 
 // Wi-Fi signal indicator (top-left, always-on-top layer, see
 // create_wifi_signal_indicator()) - four ascending bars filled up to the
 // current RSSI-derived level, plus a red diagonal strike across all-dim bars
 // when not connected. Same "top layer object, visible on every screen"
-// pattern as lock_indicator above. Updated by wifi_signal_apply_to_ui(),
+// pattern as pin_indicator above. Updated by wifi_signal_apply_to_ui(),
 // driven off a periodic RSSI sample taken in network_task (see
 // WIFI_SIGNAL_SAMPLE_INTERVAL_MS) - WiFi.RSSI() is a local driver read, not a
 // network round-trip, but it's funneled through the same
@@ -325,7 +337,7 @@ struct DeviceSettings
   char aerodatabox_key[96] = ""; // RapidAPI key for AeroDataBox (live flight status, optional)
   uint8_t idle_return_home_min = 5; // one of IDLE_TIMEOUT_OPTIONS_MIN - see create_settings_screen()
   bool flight_alert = true; // show the Flight screen for 2 min when the flight's data changes
-  uint8_t home_shortcuts = SHORTCUTS_ON_TAP; // Home shortcut icons: SHORTCUTS_ALWAYS / _ON_TAP / _OFF
+  uint8_t home_shortcuts = SHORTCUTS_ON_TAP; // SHORTCUTS_ALWAYS (icons on Home) / _ON_TAP (top-left menu) / _OFF
   // Proxmox VE cluster - see proxmox.ino. host is "ip-or-hostname:port"
   // (default port 8006); token_id is the full "user@realm!tokenname" from
   // Datacenter -> Permissions -> API Tokens; token_secret is the UUID shown
@@ -339,6 +351,14 @@ static DeviceSettings settings;
 
 void clock_tick_cb(lv_timer_t *timer)
 {
+  // A shifted picture (40 lines rolled up) recovers within 2 seconds.
+  static uint8_t resync_countdown = RGB_RESYNC_INTERVAL_S;
+  if (--resync_countdown == 0)
+  {
+    resync_countdown = RGB_RESYNC_INTERVAL_S;
+    rgb_panel_resync(rgbpanel);
+  }
+
   demo_sec++;
   if (demo_sec >= 60)
   {
@@ -370,19 +390,15 @@ void clock_tick_cb(lv_timer_t *timer)
   // Auto-return to Home after settings.idle_return_home_min of no touch -
   // except while the Bambu screen is showing because a print just
   // auto-opened it (that case is handled by the finish-triggered return
-  // below instead), never while locked, and never while viewing the
+  // below instead), never while pinned, and never while viewing the
   // Calendar day-detail screen (its own back button is the only exit).
-  // Corner-revealed shortcut icons: hide them again after 10 s.
-  if (home_shortcuts_until_ms != 0 && millis() >= home_shortcuts_until_ms)
-  {
-    home_shortcuts_until_ms = 0;
-    home_shortcuts_apply_mode();
-  }
+  // Jump menu left open: close it after 10 s.
+  if (nav_menu_until_ms != 0 && millis() >= nav_menu_until_ms) nav_menu_hide();
 
   // Flight change alert over: back to whatever was showing before.
   if (flight_alert_until_ms != 0 && millis() >= flight_alert_until_ms) flight_alert_end(false);
 
-  if (!screen_locked && !in_settings && !in_calendar_day && current_screen != 0 && flight_alert_until_ms == 0)
+  if (!screen_pinned && !in_settings && !in_calendar_day && current_screen != 0 && flight_alert_until_ms == 0)
   {
     bool bambu_auto_exempt = (current_screen == 1 && bambu_screen_auto_opened);
     uint32_t idle_return_home_ms = (uint32_t)settings.idle_return_home_min * 60UL * 1000UL;
@@ -397,7 +413,7 @@ void clock_tick_cb(lv_timer_t *timer)
   // If the Bambu screen was auto-opened for a print and that print has since
   // finished, return to Home 5 minutes after the finish instead of waiting
   // on the (suppressed) inactivity timeout above.
-  if (!screen_locked && bambu_auto_return_home_at_ms != 0 && millis() >= bambu_auto_return_home_at_ms)
+  if (!screen_pinned && bambu_auto_return_home_at_ms != 0 && millis() >= bambu_auto_return_home_at_ms)
   {
     bambu_auto_return_home_at_ms = 0;
     bambu_screen_auto_opened = false;
@@ -416,6 +432,20 @@ void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color
 #else
   gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)&color_p->full, w, h);
 #endif
+
+  // The panel's DMA reads the frame buffer straight from PSRAM, so what the
+  // CPU just wrote must leave the data cache. Arduino_GFX writes back from
+  // the area's exact first pixel, which is rarely cache-line aligned, and
+  // the first line of an area could stay stale - short dark dashes (16 px =
+  // one 32-byte line) at the left edge of freshly drawn objects. Write back
+  // the whole rows, rounded out to 64-byte lines.
+  uint16_t *fb = gfx->getFramebuffer();
+  if (fb)
+  {
+    uintptr_t start = (uintptr_t)(fb + (uint32_t)area->y1 * screenWidth) & ~(uintptr_t)63;
+    uintptr_t end = ((uintptr_t)(fb + (uint32_t)(area->y2 + 1) * screenWidth) + 63) & ~(uintptr_t)63;
+    Cache_WriteBack_Addr((uint32_t)start, (uint32_t)(end - start));
+  }
 
   lv_disp_flush_ready(disp);
 }
@@ -479,7 +509,7 @@ uint8_t adjacent_screen(uint8_t from, int dir)
 // Vertical drags are left alone so the Tracking screen can still scroll.
 void screen_gesture_cb(lv_event_t *e)
 {
-  if (screen_locked) return;
+  if (screen_pinned) return;
 
   lv_indev_t *indev = lv_indev_get_act();
   if (!indev) return;
@@ -514,6 +544,7 @@ static uint8_t pending_screen = 0;
 
 void blackout_reveal_cb(lv_timer_t *timer)
 {
+  rgb_panel_resync(rgbpanel); // while the screen is black anyway
   switch_screen(pending_screen, LV_SCR_LOAD_ANIM_NONE);
   lv_obj_add_flag(blackout_overlay, LV_OBJ_FLAG_HIDDEN);
 }
@@ -532,50 +563,166 @@ void go_to_screen_blackout(uint8_t target)
 // also flips the page.
 void corner_tap_next_screen_cb(lv_event_t *e)
 {
-  if (screen_locked || in_settings || in_calendar_day) return;
+  if (screen_pinned || in_settings || in_calendar_day) return;
+  nav_menu_hide();
   flight_alert_cancel();
   bambu_screen_auto_opened = false;
   bambu_auto_return_home_at_ms = 0;
   go_to_screen_blackout(adjacent_screen(current_screen, +1));
 }
 
-// Shows/hides the shortcut row and the corner target per settings.home_shortcuts.
-void home_shortcuts_apply_mode()
+// Jumps to a screen from the Home icons or the jump menu.
+void jump_to_screen(uint8_t target)
 {
-  if (!home_shortcuts_row || !home_shortcuts_hotspot) return;
-  bool always = settings.home_shortcuts == SHORTCUTS_ALWAYS;
-  bool on_tap = settings.home_shortcuts == SHORTCUTS_ON_TAP;
-  bool showing = always || (on_tap && home_shortcuts_until_ms != 0);
-  (showing ? lv_obj_clear_flag : lv_obj_add_flag)(home_shortcuts_row, LV_OBJ_FLAG_HIDDEN);
-  (on_tap && !showing ? lv_obj_clear_flag : lv_obj_add_flag)(home_shortcuts_hotspot, LV_OBJ_FLAG_HIDDEN);
-}
-
-// Corner tap in "show on corner tap" mode: the row appears for 10 seconds.
-void home_shortcuts_reveal_cb(lv_event_t *e)
-{
-  if (screen_locked) return;
-  home_shortcuts_until_ms = millis() + HOME_SHORTCUTS_SHOW_MS;
-  home_shortcuts_apply_mode();
-}
-
-// Home screen shortcut icons: jump straight to that screen.
-void home_shortcut_clicked_cb(lv_event_t *e)
-{
-  if (screen_locked) return;
-  uint8_t target = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
-  if (!screen_available(target)) return;
+  if (screen_pinned || !screen_available(target)) return;
+  nav_menu_hide();
   flight_alert_cancel();
   bambu_screen_auto_opened = false;
   bambu_auto_return_home_at_ms = 0;
-  if (home_shortcuts_until_ms) { home_shortcuts_until_ms = 0; home_shortcuts_apply_mode(); }
-  go_to_screen_blackout(target);
+  if (target != current_screen) go_to_screen_blackout(target);
+}
+
+void home_shortcut_clicked_cb(lv_event_t *e)
+{
+  jump_to_screen((uint8_t)(uintptr_t)lv_event_get_user_data(e));
+}
+
+// Shows/hides the Home icon row and the top-left menu corner per
+// settings.home_shortcuts. The menu corner works on every screen (Settings
+// excepted); the Home row starts right of it so both can be used.
+void nav_shortcuts_apply_mode()
+{
+  bool always = settings.home_shortcuts == SHORTCUTS_ALWAYS;
+  if (home_shortcuts_row) (always ? lv_obj_clear_flag : lv_obj_add_flag)(home_shortcuts_row, LV_OBJ_FLAG_HIDDEN);
+  bool corner = settings.home_shortcuts != SHORTCUTS_OFF && !in_settings;
+  if (nav_menu_hotspot) (corner ? lv_obj_clear_flag : lv_obj_add_flag)(nav_menu_hotspot, LV_OBJ_FLAG_HIDDEN);
+}
+
+void nav_menu_hide()
+{
+  nav_menu_until_ms = 0;
+  if (nav_menu_card) lv_obj_add_flag(nav_menu_card, LV_OBJ_FLAG_HIDDEN);
+  if (nav_menu_backdrop) lv_obj_add_flag(nav_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
+}
+
+void nav_menu_show()
+{
+  if (!nav_menu_card) return;
+  for (int i = 0; i < SCREEN_COUNT; i++)
+  {
+    if (!nav_menu_btn[i]) continue;
+    (screen_available(i) ? lv_obj_clear_flag : lv_obj_add_flag)(nav_menu_btn[i], LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_border_width(nav_menu_btn[i], i == current_screen ? 2 : 0, LV_PART_MAIN);
+  }
+  lv_obj_clear_flag(nav_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(nav_menu_card, LV_OBJ_FLAG_HIDDEN);
+  nav_menu_until_ms = millis() + NAV_MENU_SHOW_MS;
+}
+
+// Top-left corner tap. On the Calendar day view that corner is its back
+// button, so it keeps working as one.
+void nav_menu_hotspot_cb(lv_event_t *e)
+{
+  if (in_settings) return;
+  if (in_calendar_day) { close_calendar_day_screen(NULL); return; }
+  if (screen_pinned) return;
+  if (nav_menu_until_ms) nav_menu_hide();
+  else nav_menu_show();
+}
+
+void nav_menu_btn_cb(lv_event_t *e)
+{
+  jump_to_screen((uint8_t)(uintptr_t)lv_event_get_user_data(e));
+}
+
+void nav_menu_backdrop_cb(lv_event_t *e)
+{
+  nav_menu_hide();
+}
+
+// One shortcut button: rounded square with a recolored icon.
+lv_obj_t *make_shortcut_btn(lv_obj_t *parent, const lv_img_dsc_t *icon, lv_color_t color, lv_event_cb_t cb, uint8_t screen, lv_coord_t size = 42)
+{
+  lv_obj_t *btn = lv_obj_create(parent);
+  lv_obj_set_size(btn, size, size);
+  lv_obj_set_style_radius(btn, 12, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(btn, lv_color_hex(0x232D38), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(btn, lv_color_hex(0x34424F), LV_PART_MAIN | LV_STATE_PRESSED);
+  lv_obj_set_style_border_color(btn, COLOR_PRIMARY, LV_PART_MAIN);
+  lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(btn, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(btn, LV_OBJ_FLAG_GESTURE_BUBBLE); // swiping over the icons still changes screen
+  lv_obj_add_event_cb(btn, cb, LV_EVENT_SHORT_CLICKED, (void *)(uintptr_t)screen);
+
+  lv_obj_t *img = lv_img_create(btn);
+  lv_img_set_src(img, icon);
+  lv_obj_set_style_img_recolor(img, color, LV_PART_MAIN);
+  lv_obj_set_style_img_recolor_opa(img, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_center(img);
+  lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
+  return btn;
+}
+
+struct ShortcutDef { const lv_img_dsc_t *icon; uint8_t screen; };
+static const ShortcutDef SHORTCUTS[] = {
+    {&home_icon_home, 0}, {&home_icon_printer, 1}, {&home_icon_calendar, 2}, {&home_icon_server, 3},
+    {&home_icon_stocks, 4}, {&home_icon_makerworld, 5}, {&home_icon_package, 6}, {&home_icon_flight, FLIGHT_SCREEN_INDEX}};
+#define SHORTCUT_COUNT (sizeof(SHORTCUTS) / sizeof(SHORTCUTS[0]))
+
+// Jump menu on the always-on-top layer: an invisible top-left hotspot, a
+// backdrop that closes the menu when tapped outside, and the icon card.
+void create_nav_menu()
+{
+  lv_obj_t *layer = lv_disp_get_layer_top(NULL);
+
+  nav_menu_backdrop = lv_obj_create(layer);
+  lv_obj_set_size(nav_menu_backdrop, 480, 480);
+  lv_obj_set_pos(nav_menu_backdrop, 0, 0);
+  lv_obj_set_style_bg_color(nav_menu_backdrop, lv_color_hex(0x000000), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(nav_menu_backdrop, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(nav_menu_backdrop, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(nav_menu_backdrop, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_event_cb(nav_menu_backdrop, nav_menu_backdrop_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_flag(nav_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
+
+  nav_menu_card = lv_obj_create(layer);
+  lv_obj_set_size(nav_menu_card, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_pos(nav_menu_card, 10, 10);
+  lv_obj_set_style_bg_color(nav_menu_card, lv_color_hex(0x10181F), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(nav_menu_card, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_color(nav_menu_card, lv_color_hex(0x34424F), LV_PART_MAIN);
+  lv_obj_set_style_border_width(nav_menu_card, 1, LV_PART_MAIN);
+  lv_obj_set_style_radius(nav_menu_card, 16, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(nav_menu_card, 8, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(nav_menu_card, 6, LV_PART_MAIN);
+  lv_obj_set_flex_flow(nav_menu_card, LV_FLEX_FLOW_ROW);
+  lv_obj_clear_flag(nav_menu_card, LV_OBJ_FLAG_SCROLLABLE);
+  for (size_t i = 0; i < SHORTCUT_COUNT; i++)
+  {
+    uint8_t scr = SHORTCUTS[i].screen;
+    nav_menu_btn[scr] = make_shortcut_btn(nav_menu_card, SHORTCUTS[i].icon,
+                                          scr == FLIGHT_SCREEN_INDEX ? COLOR_SECONDARY : COLOR_PRIMARY, nav_menu_btn_cb, scr);
+  }
+  lv_obj_add_flag(nav_menu_card, LV_OBJ_FLAG_HIDDEN);
+
+  nav_menu_hotspot = lv_obj_create(layer);
+  lv_obj_set_size(nav_menu_hotspot, 80, 70);
+  lv_obj_align(nav_menu_hotspot, LV_ALIGN_TOP_LEFT, 0, 0);
+  lv_obj_set_style_bg_opa(nav_menu_hotspot, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(nav_menu_hotspot, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(nav_menu_hotspot, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(nav_menu_hotspot, LV_OBJ_FLAG_GESTURE_BUBBLE);
+  lv_obj_add_event_cb(nav_menu_hotspot, nav_menu_hotspot_cb, LV_EVENT_SHORT_CLICKED, NULL);
+
+  nav_shortcuts_apply_mode();
 }
 
 // Tapping the Home screen's print-status badge jumps straight to the Bambu
 // screen (index 1 in screens[]).
 void bambu_badge_clicked_cb(lv_event_t *e)
 {
-  if (screen_locked) return;
+  if (screen_pinned) return;
   bambu_screen_auto_opened = false;
   bambu_auto_return_home_at_ms = 0;
   go_to_screen_blackout(1);
@@ -585,41 +732,76 @@ void bambu_badge_clicked_cb(lv_event_t *e)
 // Proxmox screen (index 3 in the screens[] array - see setup()).
 void proxmox_badge_clicked_cb(lv_event_t *e)
 {
-  if (screen_locked) return;
+  if (screen_pinned) return;
   go_to_screen_blackout(3);
 }
 
-// Long-press bottom-left corner (3s) to toggle screen_locked - see
-// create_lock_hotspot(). Timed manually via PRESSED/PRESSING/RELEASED
+// Long-press bottom-left corner (3s) to toggle screen_pinned - see
+// create_pin_hotspot(). Timed manually via PRESSED/PRESSING/RELEASED
 // rather than the indev's built-in long_press_time, since that's already
 // set to 5s for the Settings hotspot (LVGL only supports one duration per
 // indev) and this needs a different, shorter hold.
-void lock_hotspot_event_cb(lv_event_t *e)
+void pin_hotspot_event_cb(lv_event_t *e)
 {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_PRESSED)
   {
-    lock_press_start_ms = millis();
-    lock_press_fired = false;
+    pin_press_start_ms = millis();
+    pin_press_fired = false;
   }
   else if (code == LV_EVENT_PRESSING)
   {
-    if (!lock_press_fired && lock_press_start_ms != 0 && millis() - lock_press_start_ms >= 3000)
+    if (!pin_press_fired && pin_press_start_ms != 0 && millis() - pin_press_start_ms >= 3000)
     {
-      lock_press_fired = true;
-      screen_locked = !screen_locked;
-      if (lock_indicator)
+      pin_press_fired = true;
+      screen_pinned = !screen_pinned;
+      if (pin_indicator)
       {
-        if (screen_locked) lv_obj_clear_flag(lock_indicator, LV_OBJ_FLAG_HIDDEN);
-        else lv_obj_add_flag(lock_indicator, LV_OBJ_FLAG_HIDDEN);
+        if (screen_pinned) lv_obj_clear_flag(pin_indicator, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(pin_indicator, LV_OBJ_FLAG_HIDDEN);
       }
     }
   }
   else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST)
   {
-    lock_press_start_ms = 0;
-    lock_press_fired = false;
+    pin_press_start_ms = 0; // pin_press_fired stays set until the next press, for SHORT_CLICKED below
   }
+  else if (code == LV_EVENT_SHORT_CLICKED)
+  {
+    // A short tap (not the 3 s pin hold): previous screen.
+    if (!pin_press_fired) corner_tap_prev_screen();
+  }
+}
+
+void corner_tap_prev_screen()
+{
+  if (screen_pinned || in_settings || in_calendar_day) return;
+  nav_menu_hide();
+  flight_alert_cancel();
+  bambu_screen_auto_opened = false;
+  bambu_auto_return_home_at_ms = 0;
+  go_to_screen_blackout(adjacent_screen(current_screen, -1));
+}
+
+void corner_tap_next_screen_bottom_cb(lv_event_t *e)
+{
+  corner_tap_next_screen_cb(e);
+}
+
+// Invisible bottom-right hotspot on the always-on-top layer: a tap moves to
+// the next screen (mirrors the bottom-left one, which goes back). Kept a bit
+// smaller than the others so it doesn't cover the Calendar's last row.
+void create_next_hotspot()
+{
+  lv_obj_t *layer = lv_disp_get_layer_top(NULL);
+  lv_obj_t *hotspot = lv_obj_create(layer);
+  lv_obj_set_size(hotspot, 70, 64);
+  lv_obj_align(hotspot, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+  lv_obj_set_style_bg_opa(hotspot, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(hotspot, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(hotspot, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(hotspot, LV_OBJ_FLAG_GESTURE_BUBBLE);
+  lv_obj_add_event_cb(hotspot, corner_tap_next_screen_bottom_cb, LV_EVENT_SHORT_CLICKED, NULL);
 }
 
 #define AP_SSID "ESP32-Dashboard-Setup"
@@ -1120,7 +1302,7 @@ String build_settings_page()
       "<fieldset><legend>Home screen</legend>"
       "<label>Shortcut icons</label><select name='shortcuts'>");
   {
-    static const char *SHORTCUT_MODES[] = {"Always", "Show on top-left corner tap", "Off"};
+    static const char *SHORTCUT_MODES[] = {"Always on Home (top-left menu on the other screens)", "Top-left corner menu", "Off"};
     for (uint8_t i = 0; i < 3; i++)
     {
       page += "<option value='" + String(i) + "'";
@@ -1132,8 +1314,8 @@ String build_settings_page()
   }
   page += F(
       "</select>"
-      "<label style='margin-top:2px;font-size:11px'>One icon per screen at the top of Home; tap one to jump there. "
-      "With \"corner tap\" they appear for 10 seconds.</label>"
+      "<label style='margin-top:2px;font-size:11px'>One icon per screen; tap one to jump there. A tap on the "
+      "top-left corner of any screen opens them as a menu (closes after 10 seconds).</label>"
       "</fieldset>"
       "<fieldset><legend>Bambu printer</legend>"
       "<label>Printer name</label><input type='text' name='pname' value='");
@@ -1589,6 +1771,8 @@ void open_settings_cb(lv_event_t *e)
   update_ap_status_label();
 
   if (page_dots_row) lv_obj_add_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
+  nav_menu_hide();
+  nav_shortcuts_apply_mode();
   lv_scr_load_anim(settings_screen, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
 }
 
@@ -1939,60 +2123,30 @@ lv_obj_t *create_home_screen()
   lv_obj_align(date_val, LV_ALIGN_CENTER, 0, 77);
   home_date_label = date_val;
 
-  // Shortcut row: one icon per screen, top-left (the top-right corner is the
-  // Settings/next-screen hotspot, so the row stops short of it).
+  // Shortcut row ("always on Home" mode): one icon per screen, between the
+  // top-left menu corner (x < 80) and the top-right Settings/next corner (x > 390).
   lv_obj_t *shortcuts = lv_obj_create(scr);
-  lv_obj_set_size(shortcuts, LV_SIZE_CONTENT, 42);
-  lv_obj_set_pos(shortcuts, 14, 8);
+  lv_obj_set_size(shortcuts, LV_SIZE_CONTENT, 38);
+  lv_obj_set_pos(shortcuts, 82, 10);
   lv_obj_set_style_bg_opa(shortcuts, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(shortcuts, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(shortcuts, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_column(shortcuts, 8, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(shortcuts, 6, LV_PART_MAIN);
   lv_obj_set_flex_flow(shortcuts, LV_FLEX_FLOW_ROW);
   lv_obj_clear_flag(shortcuts, LV_OBJ_FLAG_SCROLLABLE);
   home_shortcuts_row = shortcuts;
 
-  static const struct { const lv_img_dsc_t *icon; uint8_t screen; } SHORTCUTS[] = {
-      {&home_icon_printer, 1}, {&home_icon_calendar, 2}, {&home_icon_server, 3}, {&home_icon_stocks, 4},
-      {&home_icon_makerworld, 5}, {&home_icon_package, 6}, {&home_icon_flight, FLIGHT_SCREEN_INDEX}};
-  for (size_t i = 0; i < sizeof(SHORTCUTS) / sizeof(SHORTCUTS[0]); i++)
+  for (size_t i = 1; i < SHORTCUT_COUNT; i++) // no Home icon on Home itself
   {
     bool flight = SHORTCUTS[i].screen == FLIGHT_SCREEN_INDEX;
-    lv_obj_t *btn = lv_obj_create(shortcuts);
-    lv_obj_set_size(btn, 42, 42);
-    lv_obj_set_style_radius(btn, 12, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x232D38), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x34424F), LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(btn, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(btn, LV_OBJ_FLAG_GESTURE_BUBBLE); // swiping over the row still changes screen
-    lv_obj_add_event_cb(btn, home_shortcut_clicked_cb, LV_EVENT_SHORT_CLICKED, (void *)(uintptr_t)SHORTCUTS[i].screen);
-
-    lv_obj_t *img = lv_img_create(btn);
-    lv_img_set_src(img, SHORTCUTS[i].icon);
-    lv_obj_set_style_img_recolor(img, flight ? COLOR_SECONDARY : COLOR_PRIMARY, LV_PART_MAIN);
-    lv_obj_set_style_img_recolor_opa(img, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_center(img);
-    lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
-
+    lv_obj_t *btn = make_shortcut_btn(shortcuts, SHORTCUTS[i].icon, flight ? COLOR_SECONDARY : COLOR_PRIMARY,
+                                      home_shortcut_clicked_cb, SHORTCUTS[i].screen, 38);
     if (flight)
     {
       home_flight_btn = btn;
       lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN); // shown by flight_refresh_screen() while a flight is coming up
     }
   }
-
-  // "Show on corner tap" mode: an invisible top-left target reveals the row.
-  home_shortcuts_hotspot = lv_obj_create(scr);
-  lv_obj_set_size(home_shortcuts_hotspot, 110, 70);
-  lv_obj_set_pos(home_shortcuts_hotspot, 0, 0);
-  lv_obj_set_style_bg_opa(home_shortcuts_hotspot, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(home_shortcuts_hotspot, 0, LV_PART_MAIN);
-  lv_obj_clear_flag(home_shortcuts_hotspot, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(home_shortcuts_hotspot, LV_OBJ_FLAG_GESTURE_BUBBLE);
-  lv_obj_add_event_cb(home_shortcuts_hotspot, home_shortcuts_reveal_cb, LV_EVENT_SHORT_CLICKED, NULL);
-  home_shortcuts_apply_mode();
 
   // ---- Weather panel: bottom 60% of the screen ----
   lv_obj_t *weather_panel = lv_obj_create(scr);
@@ -2314,31 +2468,31 @@ void create_settings_hotspot()
 // create_settings_hotspot() above (moved off top-left so it no longer
 // covers the Calendar day-detail screen's back button there - see
 // calendar.ino's create_calendar_day_screen()). Holding it 3s toggles
-// screen_locked (see lock_hotspot_event_cb() for why this is timed
+// screen_pinned (see pin_hotspot_event_cb() for why this is timed
 // manually instead of via long_press_time). Also builds the small red
-// "LOCKED" pill shown top-center while locked.
-void create_lock_hotspot()
+// "PINNED" pill shown top-center while pinned.
+void create_pin_hotspot()
 {
   lv_obj_t *layer = lv_disp_get_layer_top(NULL);
-  lock_hotspot = lv_obj_create(layer);
-  lv_obj_set_size(lock_hotspot, 90, 90);
-  lv_obj_align(lock_hotspot, LV_ALIGN_BOTTOM_LEFT, 0, 0);
-  lv_obj_set_style_bg_opa(lock_hotspot, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(lock_hotspot, 0, LV_PART_MAIN);
-  lv_obj_clear_flag(lock_hotspot, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_event_cb(lock_hotspot, lock_hotspot_event_cb, LV_EVENT_ALL, NULL);
+  pin_hotspot = lv_obj_create(layer);
+  lv_obj_set_size(pin_hotspot, 90, 90);
+  lv_obj_align(pin_hotspot, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+  lv_obj_set_style_bg_opa(pin_hotspot, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(pin_hotspot, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(pin_hotspot, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_event_cb(pin_hotspot, pin_hotspot_event_cb, LV_EVENT_ALL, NULL);
 
-  lock_indicator = lv_label_create(layer);
-  lv_label_set_text(lock_indicator, "LOCKED");
-  lv_obj_set_style_text_color(lock_indicator, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_bg_color(lock_indicator, lv_color_hex(0xEF5350), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(lock_indicator, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_pad_hor(lock_indicator, 12, LV_PART_MAIN);
-  lv_obj_set_style_pad_ver(lock_indicator, 4, LV_PART_MAIN);
-  lv_obj_set_style_radius(lock_indicator, 10, LV_PART_MAIN);
-  lv_obj_clear_flag(lock_indicator, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_align(lock_indicator, LV_ALIGN_TOP_MID, 0, 6);
-  lv_obj_add_flag(lock_indicator, LV_OBJ_FLAG_HIDDEN);
+  pin_indicator = lv_label_create(layer);
+  lv_label_set_text(pin_indicator, "PINNED");
+  lv_obj_set_style_text_color(pin_indicator, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(pin_indicator, lv_color_hex(0xEF5350), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(pin_indicator, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_pad_hor(pin_indicator, 12, LV_PART_MAIN);
+  lv_obj_set_style_pad_ver(pin_indicator, 4, LV_PART_MAIN);
+  lv_obj_set_style_radius(pin_indicator, 10, LV_PART_MAIN);
+  lv_obj_clear_flag(pin_indicator, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_align(pin_indicator, LV_ALIGN_TOP_MID, 0, 6);
+  lv_obj_add_flag(pin_indicator, LV_OBJ_FLAG_HIDDEN);
 }
 
 // Persistent Wi-Fi signal indicator, top-right corner of the always-on-top
@@ -2424,6 +2578,7 @@ void switch_screen(uint8_t num, lv_scr_load_anim_t anim)
   lv_scr_load_anim(screens[num], anim, 0, 0, false);
   current_screen = num;
   update_page_indicator(num);
+  nav_shortcuts_apply_mode(); // the menu corner is free on Home in "always on Home" mode
 }
 
 
@@ -2526,22 +2681,29 @@ void setup()
   screenWidth = gfx->width();
   screenHeight = gfx->height();
 
-#ifdef ESP32
-  // PSRAM, not internal RAM: this is just a staging buffer copied out by
-  // my_disp_flush() every frame, not DMA target memory, and at 480*200*2
-  // bytes (~190KB) it was starving WiFi's internal-RAM RX buffer allocation
-  // (free heap was down to ~24KB, causing AP start failures).
-  disp_draw_buf = (lv_color_t *)heap_caps_malloc(sizeof(lv_color_t) * screenWidth * 200, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-#else
-  disp_draw_buf = (lv_color_t *)malloc(sizeof(lv_color_t) * screenWidth * 200);
-#endif
+  // LVGL draws into this buffer, then my_disp_flush() copies it into the
+  // panel's frame buffer (PSRAM). A small buffer in internal RAM keeps all
+  // the drawing work (blending reads + writes) off PSRAM, whose bandwidth the
+  // panel's refresh shares with Wi-Fi/TLS - starving it shows as flashing
+  // lines. 32 lines (~30 KB) is small enough to leave Wi-Fi its internal RAM
+  // (a 190 KB internal buffer once caused AP start failures); falls back to
+  // the old 200-line PSRAM buffer if the allocation fails.
+  uint32_t draw_buf_px = screenWidth * 32;
+  disp_draw_buf = (lv_color_t *)heap_caps_malloc(sizeof(lv_color_t) * draw_buf_px, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!disp_draw_buf)
+  {
+    draw_buf_px = screenWidth * 200;
+    disp_draw_buf = (lv_color_t *)heap_caps_malloc(sizeof(lv_color_t) * draw_buf_px, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  }
+  Serial.printf("LVGL draw buffer: %u lines in %s\n", (unsigned)(draw_buf_px / screenWidth),
+                draw_buf_px == screenWidth * 32 ? "internal RAM" : "PSRAM");
 
   if (!disp_draw_buf) {
     Serial.println("LVGL disp_draw_buf allocate failed!");
   }
   else
   {
-    lv_disp_draw_buf_init(&draw_buf, disp_draw_buf, NULL, screenWidth * 200);
+    lv_disp_draw_buf_init(&draw_buf, disp_draw_buf, NULL, draw_buf_px);
 
     lv_disp_drv_init(&disp_drv);
     disp_drv.hor_res = screenWidth;
@@ -2574,7 +2736,9 @@ void setup()
 
     create_page_indicator();
     create_settings_hotspot();
-    create_lock_hotspot();
+    create_pin_hotspot();
+    create_next_hotspot();
+    create_nav_menu();
     create_wifi_signal_indicator();
     create_blackout_overlay();
     create_finish_flash_overlay();

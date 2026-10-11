@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 SIZE = 30
 ICONS = [  # (C name, MDI name, codepoint)
+    ("home_icon_home", "home", 0xF02DC),
     ("home_icon_printer", "printer-3d-nozzle", 0xF0E5B),
     ("home_icon_calendar", "calendar-month", 0xF0E17),
     ("home_icon_server", "server-network", 0xF048D),

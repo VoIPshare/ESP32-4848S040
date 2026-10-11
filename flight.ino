@@ -282,7 +282,7 @@ void flight_refresh_screen()
 // anywhere during the alert goes to Home; a swipe just navigates normally.
 void flight_alert_start(uint8_t mask)
 {
-  if (!mask || !settings.flight_alert || screen_locked || in_settings || in_calendar_day || !flight_screen_active()) return;
+  if (!mask || !settings.flight_alert || screen_pinned || in_settings || in_calendar_day || !flight_screen_active()) return;
   if (flight_alert_until_ms == 0) flight_alert_prev_screen = current_screen;
   flight_alert_mask |= mask;
   flight_alert_until_ms = millis() + FLIGHT_ALERT_MS;
@@ -307,7 +307,7 @@ void flight_alert_end(bool go_home)
   if (flight_alert_until_ms == 0) return;
   uint8_t target = go_home ? 0 : flight_alert_prev_screen;
   flight_alert_cancel();
-  if (current_screen == FLIGHT_SCREEN_INDEX && !in_settings && !screen_locked && target != FLIGHT_SCREEN_INDEX)
+  if (current_screen == FLIGHT_SCREEN_INDEX && !in_settings && !screen_pinned && target != FLIGHT_SCREEN_INDEX)
     go_to_screen_blackout(screen_available(target) ? target : 0);
 }
 
