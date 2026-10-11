@@ -181,6 +181,7 @@ void calendar_apply_to_ui()
 
   update_home_next_event();
   data_unlock();
+  flight_refresh_screen();
 }
 
 // The flight line pinned on the Home strip: the next flight from 24 hours
@@ -459,7 +460,9 @@ lv_obj_t *create_calendar_screen()
     lv_label_set_text(h, day_letters[c]);
     lv_obj_set_style_text_color(h, COLOR_TEXT_MUTED, LV_PART_MAIN);
     lv_obj_set_style_text_font(h, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_obj_set_pos(h, grid_x + c * cell_w + cell_w / 2 - 4, grid_top);
+    lv_obj_set_style_text_align(h, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(h, cell_w);
+    lv_obj_set_pos(h, grid_x + c * cell_w, grid_top);
   }
 
   // Cell positions are fixed for the lifetime of the screen - only content
@@ -479,10 +482,15 @@ lv_obj_t *create_calendar_screen()
     lv_obj_set_pos(marker, cx - 17, cy - 17);
     cal_cell_marker[i] = marker;
 
+    // Same width as the marker with centered text, so 1- and 2-digit days
+    // both sit in the middle of the circle (a content-sized label at a fixed
+    // offset left single digits off-center).
     lv_obj_t *lab = lv_label_create(scr);
     lv_obj_set_style_text_font(lab, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_style_text_align(lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(lab, 34);
     lv_obj_add_flag(lab, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_pos(lab, cx - 8, cy - 10);
+    lv_obj_set_pos(lab, cx - 17, cy - lv_font_montserrat_16.line_height / 2);
     cal_cell_label[i] = lab;
 
     // Invisible full-cell touch target, on top so it - not the small dot -

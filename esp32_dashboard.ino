@@ -7,12 +7,12 @@
 /*******************************************************************************
  * ESP32-4848S040 Multi-Screen Dashboard
  * LVGL 8.3.0 Compatible Version with ST7701S Support
- * 480x480 Display with 7 Swipeable Screens
+ * 480x480 Display with 7-8 Swipeable Screens
  ******************************************************************************/
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "2.0"
+#define FW_VERSION "2.4"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -54,7 +54,7 @@
 // weather code below) because Arduino's auto-generated function prototypes
 // land right after the includes, and would otherwise reference this type
 // before it's declared.
-enum WeatherIconType { WICON_CLEAR, WICON_PARTLY_CLOUDY, WICON_CLOUDY, WICON_FOG, WICON_RAIN, WICON_SNOW, WICON_THUNDER };
+enum WeatherIconType { WICON_CLEAR, WICON_PARTLY_CLOUDY, WICON_CLOUDY, WICON_FOG, WICON_DRIZZLE, WICON_RAIN, WICON_SNOW, WICON_THUNDER };
 
 // Custom 86px regular font (Roboto Regular, subset to 0-9 : ° C F) used for
 // the clock and the weather temperature - see lv_font_roboto_regular_86.c.
@@ -129,8 +129,11 @@ static lv_disp_drv_t disp_drv;
 #define COLOR_TEXT_MUTED lv_color_hex(0x8A97A0)
 #define COLOR_CLOUD lv_color_hex(0xECEFF1)
 
-// Screens: Home, Bambu printer, Calendar, Proxmox, Stocks, MakerWorld, Packages
-#define SCREEN_COUNT 7
+// Screens: Home, Bambu printer, Calendar, Proxmox, Stocks, MakerWorld,
+// Packages, Flight. The Flight screen is only in the swipe sequence while
+// a flight is coming up - see screen_available()/flight.ino.
+#define SCREEN_COUNT 8
+#define FLIGHT_SCREEN_INDEX 7
 static lv_obj_t *screens[SCREEN_COUNT];
 static uint8_t current_screen = 0;
 
@@ -323,6 +326,7 @@ void clock_tick_cb(lv_timer_t *timer)
     lv_label_set_text_fmt(home_min_label, "%02d", demo_min);
     // Passed events drop off and flight countdowns tick, without a refetch.
     update_home_next_event();
+    flight_refresh_screen();
   }
 
   // Auto-hide the page-position dots after a minute of no touch activity.
@@ -416,6 +420,27 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
   }
 }
 
+// False for screens that are currently left out of the swipe sequence
+// (only the Flight screen, when no flight is coming up).
+bool screen_available(uint8_t idx)
+{
+  if (idx == FLIGHT_SCREEN_INDEX) return flight_screen_active();
+  return idx < SCREEN_COUNT;
+}
+
+// Next (dir = +1) or previous (-1) screen in the swipe sequence, wrapping
+// around and skipping unavailable ones.
+uint8_t adjacent_screen(uint8_t from, int dir)
+{
+  uint8_t idx = from;
+  for (int i = 0; i < SCREEN_COUNT; i++)
+  {
+    idx = (uint8_t)((idx + SCREEN_COUNT + dir) % SCREEN_COUNT);
+    if (screen_available(idx)) return idx;
+  }
+  return 0;
+}
+
 // Horizontal swipe anywhere on a screen moves to the next/previous screen.
 // Vertical drags are left alone so the Tracking screen can still scroll.
 void screen_gesture_cb(lv_event_t *e)
@@ -436,13 +461,13 @@ void screen_gesture_cb(lv_event_t *e)
   {
     bambu_screen_auto_opened = false;
     bambu_auto_return_home_at_ms = 0;
-    go_to_screen_blackout((current_screen + 1) % SCREEN_COUNT);
+    go_to_screen_blackout(adjacent_screen(current_screen, +1));
   }
   else if (dir == LV_DIR_RIGHT)
   {
     bambu_screen_auto_opened = false;
     bambu_auto_return_home_at_ms = 0;
-    go_to_screen_blackout((current_screen + SCREEN_COUNT - 1) % SCREEN_COUNT);
+    go_to_screen_blackout(adjacent_screen(current_screen, -1));
   }
 }
 
@@ -464,6 +489,18 @@ void go_to_screen_blackout(uint8_t target)
   lv_obj_clear_flag(blackout_overlay, LV_OBJ_FLAG_HIDDEN);
   lv_timer_t *t = lv_timer_create(blackout_reveal_cb, 100, NULL);
   lv_timer_set_repeat_count(t, 1);
+}
+
+// Short tap on the top-right hotspot (the same one that opens Settings on a
+// 5s hold - see create_settings_hotspot()): next screen, like a left swipe.
+// SHORT_CLICKED isn't sent after a long press, so opening Settings never
+// also flips the page.
+void corner_tap_next_screen_cb(lv_event_t *e)
+{
+  if (screen_locked || in_settings || in_calendar_day) return;
+  bambu_screen_auto_opened = false;
+  bambu_auto_return_home_at_ms = 0;
+  go_to_screen_blackout(adjacent_screen(current_screen, +1));
 }
 
 // Tapping the Home screen's print-status badge jumps straight to the Bambu
@@ -611,30 +648,58 @@ const char *tz_name_to_posix(const char *name)
 static uint32_t last_weather_fetch_ms = 0;
 #define WEATHER_FETCH_INTERVAL_MS (10UL * 60UL * 1000UL)
 
-static lv_obj_t *wicon_sun = NULL;
-static lv_obj_t *wicon_puffs[3] = {NULL, NULL, NULL};
-static lv_obj_t *wicon_cloud_base = NULL;
-static lv_obj_t *wicon_rain_drops[3] = {NULL, NULL, NULL};
-static lv_obj_t *wicon_snow_dots[3] = {NULL, NULL, NULL};
-static lv_obj_t *wicon_fog_bars[3] = {NULL, NULL, NULL};
+// Weather icon parts (built by build_weather_icon(), all inside one 210x130
+// container): each condition shows a different subset. Only circles,
+// rounded rects and lines - no images, no shadows (cheap to redraw).
+static lv_obj_t *wicon_sun_full = NULL;     // clear day: big sun with 8 rays
+static lv_obj_t *wicon_sun_small = NULL;    // partly cloudy day: smaller sun behind the cloud
+static lv_obj_t *wicon_moon_full = NULL;    // clear night: crescent + stars
+static lv_obj_t *wicon_moon_small = NULL;   // partly cloudy night
+static lv_obj_t *wicon_cloud_partly = NULL; // cloud in front of the small sun/moon
+static lv_obj_t *wicon_cloud_back = NULL;   // overcast: darker cloud behind...
+static lv_obj_t *wicon_cloud_front = NULL;  // ...and a white one in front
+static lv_obj_t *wicon_cloud_top = NULL;    // rain/drizzle/snow/storm/fog: cloud with the weather below it
+static lv_obj_t *wicon_rain[4] = {NULL};
+static lv_obj_t *wicon_snow[6] = {NULL};
+static lv_obj_t *wicon_fog_bars[3] = {NULL};
 static lv_obj_t *wicon_bolt = NULL;
 
-void set_weather_icon(WeatherIconType type)
+static void wicon_show(lv_obj_t *obj, bool show)
 {
-  bool show_sun = (type == WICON_CLEAR || type == WICON_PARTLY_CLOUDY);
-  bool show_cloud = (type != WICON_CLEAR && type != WICON_FOG);
-  bool show_rain = (type == WICON_RAIN);
-  bool show_snow = (type == WICON_SNOW);
-  bool show_fog = (type == WICON_FOG);
-  bool show_bolt = (type == WICON_THUNDER);
+  if (obj) (show ? lv_obj_clear_flag : lv_obj_add_flag)(obj, LV_OBJ_FLAG_HIDDEN);
+}
 
-  if (wicon_sun) (show_sun ? lv_obj_clear_flag : lv_obj_add_flag)(wicon_sun, LV_OBJ_FLAG_HIDDEN);
-  for (int i = 0; i < 3; i++) if (wicon_puffs[i]) (show_cloud ? lv_obj_clear_flag : lv_obj_add_flag)(wicon_puffs[i], LV_OBJ_FLAG_HIDDEN);
-  if (wicon_cloud_base) (show_cloud ? lv_obj_clear_flag : lv_obj_add_flag)(wicon_cloud_base, LV_OBJ_FLAG_HIDDEN);
-  for (int i = 0; i < 3; i++) if (wicon_rain_drops[i]) (show_rain ? lv_obj_clear_flag : lv_obj_add_flag)(wicon_rain_drops[i], LV_OBJ_FLAG_HIDDEN);
-  for (int i = 0; i < 3; i++) if (wicon_snow_dots[i]) (show_snow ? lv_obj_clear_flag : lv_obj_add_flag)(wicon_snow_dots[i], LV_OBJ_FLAG_HIDDEN);
-  for (int i = 0; i < 3; i++) if (wicon_fog_bars[i]) (show_fog ? lv_obj_clear_flag : lv_obj_add_flag)(wicon_fog_bars[i], LV_OBJ_FLAG_HIDDEN);
-  if (wicon_bolt) (show_bolt ? lv_obj_clear_flag : lv_obj_add_flag)(wicon_bolt, LV_OBJ_FLAG_HIDDEN);
+// Recolors every part of a cloud built by make_cloud().
+static void wicon_cloud_color(lv_obj_t *cloud, lv_color_t color)
+{
+  if (!cloud) return;
+  for (uint32_t i = 0; i < lv_obj_get_child_cnt(cloud); i++)
+    lv_obj_set_style_bg_color(lv_obj_get_child(cloud, i), color, LV_PART_MAIN);
+}
+
+void set_weather_icon(WeatherIconType type, bool is_day)
+{
+  bool precip = (type == WICON_RAIN || type == WICON_DRIZZLE || type == WICON_SNOW || type == WICON_THUNDER || type == WICON_FOG);
+
+  wicon_show(wicon_sun_full, type == WICON_CLEAR && is_day);
+  wicon_show(wicon_moon_full, type == WICON_CLEAR && !is_day);
+  wicon_show(wicon_sun_small, type == WICON_PARTLY_CLOUDY && is_day);
+  wicon_show(wicon_moon_small, type == WICON_PARTLY_CLOUDY && !is_day);
+  wicon_show(wicon_cloud_partly, type == WICON_PARTLY_CLOUDY);
+  wicon_show(wicon_cloud_back, type == WICON_CLOUDY);
+  wicon_show(wicon_cloud_front, type == WICON_CLOUDY);
+  wicon_show(wicon_cloud_top, precip);
+
+  lv_color_t top = lv_color_hex(0xB0BEC5);                   // rain, drizzle, fog
+  if (type == WICON_SNOW) top = COLOR_CLOUD;                  // snow: white cloud
+  else if (type == WICON_THUNDER) top = lv_color_hex(0x78909C); // storm: dark cloud
+  wicon_cloud_color(wicon_cloud_top, top);
+
+  for (int i = 0; i < 4; i++)
+    wicon_show(wicon_rain[i], type == WICON_RAIN || (type == WICON_DRIZZLE && (i == 1 || i == 2)));
+  for (int i = 0; i < 6; i++) wicon_show(wicon_snow[i], type == WICON_SNOW);
+  for (int i = 0; i < 3; i++) wicon_show(wicon_fog_bars[i], type == WICON_FOG);
+  wicon_show(wicon_bolt, type == WICON_THUNDER);
 }
 
 WeatherIconType wmo_weather_icon(int code)
@@ -643,7 +708,8 @@ WeatherIconType wmo_weather_icon(int code)
   if (code == 1 || code == 2) return WICON_PARTLY_CLOUDY;
   if (code == 3) return WICON_CLOUDY;
   if (code == 45 || code == 48) return WICON_FOG;
-  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) return WICON_RAIN;
+  if (code >= 51 && code <= 57) return WICON_DRIZZLE;
+  if ((code >= 61 && code <= 67) || (code >= 80 && code <= 82)) return WICON_RAIN;
   if ((code >= 71 && code <= 77) || (code >= 85 && code <= 86)) return WICON_SNOW;
   if (code >= 95) return WICON_THUNDER;
   return WICON_PARTLY_CLOUDY;
@@ -675,6 +741,7 @@ struct WeatherData
   float wind = 0;
   float uv = 0;
   int wcode = 0;
+  bool is_day = true;
 };
 static WeatherData weather_data;
 static volatile bool weather_needs_ui_refresh = false;
@@ -686,7 +753,7 @@ void weather_apply_to_ui()
   // character - fine for most climates but flag it if you're somewhere cold.
   if (weather_temp_lab) lv_label_set_text_fmt(weather_temp_lab, "%.0f\xC2\xB0" "C", weather_data.temp);
   if (weather_desc_lab) lv_label_set_text(weather_desc_lab, wmo_weather_desc(weather_data.wcode));
-  set_weather_icon(wmo_weather_icon(weather_data.wcode));
+  set_weather_icon(wmo_weather_icon(weather_data.wcode), weather_data.is_day);
   if (weather_humidity_val) lv_label_set_text_fmt(weather_humidity_val, "%d%%", weather_data.humidity);
   if (weather_wind_val) lv_label_set_text_fmt(weather_wind_val, "%.0f km/h", weather_data.wind);
   if (weather_uv_val) lv_label_set_text_fmt(weather_uv_val, "%.0f", weather_data.uv);
@@ -735,7 +802,7 @@ void fetch_weather()
   char url[192];
   snprintf(url, sizeof(url),
            "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
-           "&current=temperature_2m,relative_humidity_2m,wind_speed_10m,uv_index,weather_code&timezone=auto",
+           "&current=temperature_2m,relative_humidity_2m,wind_speed_10m,uv_index,weather_code,is_day&timezone=auto",
            lat, lon);
 
   WiFiClientSecure client;
@@ -777,6 +844,7 @@ void fetch_weather()
   weather_data.wind = current["wind_speed_10m"] | 0.0f;
   weather_data.uv = current["uv_index"] | 0.0f;
   weather_data.wcode = current["weather_code"] | 0;
+  weather_data.is_day = (current["is_day"] | 1) != 0;
   weather_needs_ui_refresh = true;
 
   Serial.printf("[Weather] %.1f C, %s\n", weather_data.temp, wmo_weather_desc(weather_data.wcode));
@@ -1154,6 +1222,8 @@ void update_page_indicator(uint8_t active)
   for (int i = 0; i < SCREEN_COUNT; i++)
   {
     lv_obj_set_style_bg_color(page_dots[i], i == active ? COLOR_PRIMARY : COLOR_TEXT_MUTED, LV_PART_MAIN);
+    if (screen_available(i) || i == active) lv_obj_clear_flag(page_dots[i], LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(page_dots[i], LV_OBJ_FLAG_HIDDEN);
   }
 }
 
@@ -1479,6 +1549,175 @@ lv_obj_t *make_pill(lv_obj_t *parent, const char *text, lv_color_t bg_color, lv_
   return pill;
 }
 
+// ==================== Weather icon ====================
+// Transparent container for one icon part.
+static lv_obj_t *wicon_group(lv_obj_t *parent)
+{
+  lv_obj_t *g = lv_obj_create(parent);
+  lv_obj_set_size(g, 210, 130);
+  lv_obj_set_pos(g, 0, 0);
+  lv_obj_set_style_bg_opa(g, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(g, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(g, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(g, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(g, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(g, LV_OBJ_FLAG_HIDDEN);
+  return g;
+}
+
+static lv_obj_t *wicon_circle(lv_obj_t *parent, lv_coord_t cx, lv_coord_t cy, lv_coord_t r, lv_color_t color)
+{
+  lv_obj_t *c = lv_obj_create(parent);
+  lv_obj_set_size(c, 2 * r, 2 * r);
+  lv_obj_set_pos(c, cx - r, cy - r);
+  lv_obj_set_style_radius(c, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(c, color, LV_PART_MAIN);
+  lv_obj_set_style_border_width(c, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(c, LV_OBJ_FLAG_CLICKABLE);
+  return c;
+}
+
+static lv_obj_t *wicon_rect(lv_obj_t *parent, lv_coord_t x, lv_coord_t y, lv_coord_t w, lv_coord_t h, lv_coord_t radius, lv_color_t color)
+{
+  lv_obj_t *r = lv_obj_create(parent);
+  lv_obj_set_size(r, w, h);
+  lv_obj_set_pos(r, x, y);
+  lv_obj_set_style_radius(r, radius, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(r, color, LV_PART_MAIN);
+  lv_obj_set_style_border_width(r, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(r, LV_OBJ_FLAG_CLICKABLE);
+  return r;
+}
+
+// Straight rounded line from (x1,y1) to (x2,y2). The two points need
+// static storage (LVGL keeps the pointer), so they come from a pool.
+static lv_obj_t *wicon_line(lv_obj_t *parent, lv_coord_t x1, lv_coord_t y1, lv_coord_t x2, lv_coord_t y2, lv_coord_t width, lv_color_t color)
+{
+  static lv_point_t pool[32][2];
+  static int used = 0;
+  if (used >= 32) return NULL;
+  lv_point_t *pts = pool[used++];
+  pts[0].x = x1; pts[0].y = y1;
+  pts[1].x = x2; pts[1].y = y2;
+  lv_obj_t *l = lv_line_create(parent);
+  lv_line_set_points(l, pts, 2);
+  lv_obj_set_style_line_color(l, color, LV_PART_MAIN);
+  lv_obj_set_style_line_width(l, width, LV_PART_MAIN);
+  lv_obj_set_style_line_rounded(l, true, LV_PART_MAIN);
+  return l;
+}
+
+// The "classic puffy" cloud: four bumps over a flat base with round ends.
+// Designed in a 142x76 box at scale 100 (%), placed with its top-left at (x, y).
+static lv_obj_t *make_cloud(lv_obj_t *parent, lv_coord_t x, lv_coord_t y, int scale, lv_color_t color)
+{
+  lv_obj_t *g = wicon_group(parent);
+  auto S = [scale](int v) -> lv_coord_t { return (lv_coord_t)(v * scale / 100); };
+  wicon_circle(g, x + S(22), y + S(54), S(22), color);
+  wicon_circle(g, x + S(52), y + S(36), S(28), color);
+  wicon_circle(g, x + S(88), y + S(32), S(32), color);
+  wicon_circle(g, x + S(120), y + S(54), S(22), color);
+  wicon_rect(g, x + S(22), y + S(46), S(98), S(30), 0, color);
+  return g;
+}
+
+// Sun: disc with `rays` rays starting at `first_deg` every 45 degrees.
+static lv_obj_t *make_sun(lv_obj_t *parent, lv_coord_t cx, lv_coord_t cy, lv_coord_t r, int first_deg, int rays)
+{
+  lv_obj_t *g = wicon_group(parent);
+  for (int i = 0; i < rays; i++)
+  {
+    float a = (first_deg + i * 45) * 3.14159265f / 180.0f;
+    float c = cosf(a), s = sinf(a);
+    wicon_line(g, cx + (lv_coord_t)(c * (r + 10)), cy + (lv_coord_t)(s * (r + 10)),
+               cx + (lv_coord_t)(c * (r + 22)), cy + (lv_coord_t)(s * (r + 22)), 6, lv_color_hex(0xFFC947));
+  }
+  lv_obj_t *disc = wicon_circle(g, cx, cy, r, lv_color_hex(0xFFC947));
+  lv_obj_set_style_bg_grad_color(disc, COLOR_SECONDARY, LV_PART_MAIN);
+  lv_obj_set_style_bg_grad_dir(disc, LV_GRAD_DIR_VER, LV_PART_MAIN);
+  return g;
+}
+
+// Crescent moon: a disc with a background-colored disc over its upper right.
+static lv_obj_t *make_moon(lv_obj_t *parent, lv_coord_t cx, lv_coord_t cy, lv_coord_t r, bool stars)
+{
+  lv_obj_t *g = wicon_group(parent);
+  wicon_circle(g, cx, cy, r, lv_color_hex(0xFFF3C4));
+  wicon_circle(g, cx + r * 52 / 100, cy - r * 40 / 100, r * 90 / 100, lv_color_hex(0x1A222B)); // Home screen background
+  if (stars)
+  {
+    wicon_circle(g, cx + 55, cy - 35, 3, lv_color_hex(0xFFF3C4));
+    wicon_circle(g, cx + 67, cy + 7, 3, lv_color_hex(0xFFF3C4));
+    wicon_circle(g, cx - 47, cy - 37, 3, lv_color_hex(0xFFF3C4));
+  }
+  return g;
+}
+
+// Builds every part of the weather icon in one 210x130 container; the
+// current condition is chosen by set_weather_icon(). Coordinates match the
+// design preview (sun/moon top-left, cloud lower right, weather below).
+void build_weather_icon(lv_obj_t *weather_panel)
+{
+  lv_obj_t *icon = lv_obj_create(weather_panel);
+  lv_obj_set_size(icon, 210, 130);
+  lv_obj_set_pos(icon, 8, 18);
+  lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(icon, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(icon, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+
+  // Clear: big sun (8 rays) / moon with stars, centered.
+  wicon_sun_full = make_sun(icon, 105, 65, 32, 0, 8);
+  wicon_moon_full = make_moon(icon, 105, 65, 38, true);
+
+  // Partly cloudy: small sun (rays only where the cloud doesn't cover it) or moon, cloud in front.
+  wicon_sun_small = make_sun(icon, 66, 52, 26, 135, 4);
+  wicon_moon_small = make_moon(icon, 70, 50, 28, false);
+  wicon_cloud_partly = make_cloud(icon, 56, 44, 100, COLOR_CLOUD);
+
+  // Overcast: darker cloud behind, white cloud in front.
+  wicon_cloud_back = make_cloud(icon, 92, 6, 70, lv_color_hex(0x90A4AE));
+  wicon_cloud_front = make_cloud(icon, 34, 40, 92, COLOR_CLOUD);
+
+  // Rain/drizzle/snow/storm/fog: cloud at the top, weather underneath.
+  wicon_cloud_top = make_cloud(icon, 38, 16, 92, lv_color_hex(0xB0BEC5));
+
+  static const lv_coord_t rain_x[4] = {70, 94, 118, 142};
+  for (int i = 0; i < 4; i++)
+  {
+    wicon_rain[i] = wicon_line(icon, rain_x[i], 100, rain_x[i] - 6, 120, 6, lv_color_hex(0x4FC3F7));
+    wicon_show(wicon_rain[i], false);
+  }
+
+  static const lv_coord_t snow_xy[6][2] = {{70, 102}, {100, 102}, {130, 102}, {85, 118}, {115, 118}, {145, 118}};
+  for (int i = 0; i < 6; i++)
+  {
+    wicon_snow[i] = wicon_circle(icon, snow_xy[i][0], snow_xy[i][1], 5, lv_color_hex(0xFFFFFF));
+    wicon_show(wicon_snow[i], false);
+  }
+
+  for (int i = 0; i < 3; i++)
+  {
+    wicon_fog_bars[i] = wicon_rect(icon, i == 1 ? 58 : 44, 94 + i * 12, 120, 8, 4, COLOR_CLOUD);
+    lv_obj_set_style_bg_opa(wicon_fog_bars[i], i == 0 ? LV_OPA_80 : (i == 1 ? LV_OPA_60 : LV_OPA_40), LV_PART_MAIN);
+    wicon_show(wicon_fog_bars[i], false);
+  }
+
+  // Lightning: thick zigzag under the storm cloud.
+  static lv_point_t bolt_pts[4] = {{114, 92}, {98, 110}, {112, 110}, {100, 128}};
+  wicon_bolt = lv_line_create(icon);
+  lv_line_set_points(wicon_bolt, bolt_pts, 4);
+  lv_obj_set_style_line_color(wicon_bolt, COLOR_WARNING, LV_PART_MAIN);
+  lv_obj_set_style_line_width(wicon_bolt, 7, LV_PART_MAIN);
+  lv_obj_set_style_line_rounded(wicon_bolt, true, LV_PART_MAIN);
+  wicon_show(wicon_bolt, false);
+
+  set_weather_icon(WICON_PARTLY_CLOUDY, true); // placeholder until the first weather fetch
+}
+
 // ==================== Screen 1: Home (date/time + weather) ====================
 lv_obj_t *create_home_screen()
 {
@@ -1585,108 +1824,7 @@ lv_obj_t *create_home_screen()
   lv_obj_add_flag(home_proxmox_badge, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_event_cb(home_proxmox_badge, proxmox_badge_clicked_cb, LV_EVENT_CLICKED, NULL);
 
-  // Icon composite: glowing sun partly covered by a cloud made of overlapping circles.
-  lv_obj_t *icon = lv_obj_create(weather_panel);
-  lv_obj_set_size(icon, 210, 130);
-  lv_obj_set_pos(icon, 8, 18);
-  lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(icon, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(icon, 0, LV_PART_MAIN);
-  lv_obj_clear_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
-
-  lv_obj_t *sun = lv_obj_create(icon);
-  lv_obj_set_size(sun, 90, 90);
-  lv_obj_set_pos(sun, 10, 10);
-  lv_obj_set_style_radius(sun, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(sun, lv_color_hex(0xFFC947), LV_PART_MAIN);
-  lv_obj_set_style_bg_grad_color(sun, COLOR_SECONDARY, LV_PART_MAIN);
-  lv_obj_set_style_bg_grad_dir(sun, LV_GRAD_DIR_VER, LV_PART_MAIN);
-  lv_obj_set_style_border_width(sun, 0, LV_PART_MAIN);
-  lv_obj_set_style_shadow_width(sun, 36, LV_PART_MAIN);
-  lv_obj_set_style_shadow_spread(sun, 2, LV_PART_MAIN);
-  lv_obj_set_style_shadow_color(sun, COLOR_SECONDARY, LV_PART_MAIN);
-  lv_obj_set_style_shadow_opa(sun, LV_OPA_40, LV_PART_MAIN);
-  lv_obj_clear_flag(sun, LV_OBJ_FLAG_SCROLLABLE);
-
-  static const lv_coord_t puff_xy[3][4] = {
-      // x, y, w, h
-      {70, 55, 52, 52},
-      {100, 38, 74, 74},
-      {150, 55, 56, 56}};
-  for (int i = 0; i < 3; i++)
-  {
-    lv_obj_t *puff = lv_obj_create(icon);
-    lv_obj_set_size(puff, puff_xy[i][2], puff_xy[i][3]);
-    lv_obj_set_pos(puff, puff_xy[i][0], puff_xy[i][1]);
-    lv_obj_set_style_radius(puff, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(puff, COLOR_CLOUD, LV_PART_MAIN);
-    lv_obj_set_style_border_width(puff, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(puff, LV_OBJ_FLAG_SCROLLABLE);
-    wicon_puffs[i] = puff;
-  }
-
-  lv_obj_t *cloud_base = lv_obj_create(icon);
-  lv_obj_set_size(cloud_base, 130, 46);
-  lv_obj_set_pos(cloud_base, 75, 76);
-  lv_obj_set_style_radius(cloud_base, 23, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(cloud_base, COLOR_CLOUD, LV_PART_MAIN);
-  lv_obj_set_style_border_width(cloud_base, 0, LV_PART_MAIN);
-  lv_obj_clear_flag(cloud_base, LV_OBJ_FLAG_SCROLLABLE);
-
-  wicon_sun = sun;
-  wicon_cloud_base = cloud_base;
-
-  // Rain drops / snow dots: sit right under the cloud's bottom edge, inside
-  // the icon container's own 130px height so they can't collide with the
-  // stats row that starts just a couple of px below it.
-  static const lv_coord_t accessory_x[3] = {95, 125, 155};
-  for (int i = 0; i < 3; i++)
-  {
-    lv_obj_t *drop = lv_obj_create(icon);
-    lv_obj_set_size(drop, 5, 12);
-    lv_obj_set_pos(drop, accessory_x[i], 118);
-    lv_obj_set_style_radius(drop, 3, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(drop, lv_color_hex(0x4FC3F7), LV_PART_MAIN);
-    lv_obj_set_style_border_width(drop, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(drop, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(drop, LV_OBJ_FLAG_HIDDEN);
-    wicon_rain_drops[i] = drop;
-
-    lv_obj_t *dot = lv_obj_create(icon);
-    lv_obj_set_size(dot, 8, 8);
-    lv_obj_set_pos(dot, accessory_x[i], 120);
-    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(dot, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_border_width(dot, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
-    wicon_snow_dots[i] = dot;
-  }
-
-  // Lightning bolt: small zigzag line under the cloud, for thunderstorms.
-  static lv_point_t bolt_pts[4] = {{146, 88}, {136, 108}, {146, 108}, {138, 128}};
-  lv_obj_t *bolt = lv_line_create(icon);
-  lv_line_set_points(bolt, bolt_pts, 4);
-  lv_obj_set_style_line_color(bolt, COLOR_WARNING, LV_PART_MAIN);
-  lv_obj_set_style_line_width(bolt, 3, LV_PART_MAIN);
-  lv_obj_set_style_line_rounded(bolt, true, LV_PART_MAIN);
-  lv_obj_add_flag(bolt, LV_OBJ_FLAG_HIDDEN);
-  wicon_bolt = bolt;
-
-  // Fog: three translucent horizontal bars, shown instead of the sun/cloud.
-  for (int i = 0; i < 3; i++)
-  {
-    lv_obj_t *bar = lv_obj_create(icon);
-    lv_obj_set_size(bar, 150, 10);
-    lv_obj_set_pos(bar, 20, 30 + i * 26);
-    lv_obj_set_style_radius(bar, 5, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(bar, COLOR_CLOUD, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_60 - i * 15, LV_PART_MAIN);
-    lv_obj_set_style_border_width(bar, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
-    wicon_fog_bars[i] = bar;
-  }
+  build_weather_icon(weather_panel);
 
   lv_obj_t *temp = lv_label_create(weather_panel);
   lv_label_set_text(temp, "24°C");
@@ -1922,7 +2060,8 @@ void create_page_indicator()
 }
 
 // Invisible top-right hotspot on the always-on-top layer. Long-pressing it
-// (5s, configured on the touch indev in setup()) opens the settings screen.
+// (5s, configured on the touch indev in setup()) opens the settings screen;
+// a short tap moves to the next screen.
 void create_settings_hotspot()
 {
   lv_obj_t *layer = lv_disp_get_layer_top(NULL);
@@ -1933,6 +2072,7 @@ void create_settings_hotspot()
   lv_obj_set_style_border_width(hotspot, 0, LV_PART_MAIN);
   lv_obj_clear_flag(hotspot, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(hotspot, open_settings_cb, LV_EVENT_LONG_PRESSED, NULL);
+  lv_obj_add_event_cb(hotspot, corner_tap_next_screen_cb, LV_EVENT_SHORT_CLICKED, NULL);
 }
 
 // Invisible bottom-left hotspot on the always-on-top layer, mirroring
@@ -2189,6 +2329,7 @@ void setup()
     screens[4] = create_stocks_screen();
     screens[5] = create_makerworld_screen();
     screens[6] = create_tracking_screen();
+    screens[FLIGHT_SCREEN_INDEX] = create_flight_screen();
     settings_screen = create_settings_screen();
     cal_day_screen = create_calendar_day_screen();
 

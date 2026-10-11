@@ -93,6 +93,7 @@ If you'd rather stay on LVGL 9.5+, you'll need to update the sketch's display-in
 
 ## Navigation
 
+- **Touch:** swipe left/right to change screen, or tap the top-right corner for the next screen (hold it 5 s for Settings). Hold the bottom-left corner 3 s to lock the current screen.
 - **Buttons (optional):** GPIO 6 → next screen, GPIO 7 → previous screen (wire each to GND, `INPUT_PULLUP`)
 - **Touch (optional):** implement a touch driver and `#include` it in the sketch — not included by default
 

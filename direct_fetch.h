@@ -77,6 +77,10 @@ bool df_is_flight_title(const char *title);
 // Copies the flight number ("TS399", spaces removed) from a title.
 bool df_extract_flight_number(const char *title, char *out, size_t out_size);
 
+// Copies the airport codes of a route ("YUL->YYZ" -> "YUL", "YYZ"); each
+// buffer needs 4 bytes. False if the title has no route.
+bool df_extract_route(const char *title, char *from, char *to);
+
 // "in 45m", "in 3h05m", "in 2d 4h".
 void df_format_countdown(time_t secs, char *buf, size_t n);
 // "Delayed +45m, gate B7, T1", "In the air, lands 19:15", "Landed 19:12", ...

@@ -1148,8 +1148,9 @@ bool df_extract_flight_number(const char *title, char *out, size_t out_size)
   return title && find_flight_number(title, out, out_size);
 }
 
-// "PUJ->YUL", "YUL - YYZ", "YUL→YYZ", "YUL to YYZ", "YUL/YYZ": two airport codes with a separator.
-static bool has_route(const char *t)
+// "PUJ->YUL", "YUL - YYZ", "YUL→YYZ", "YUL to YYZ", "YUL/YYZ": two airport
+// codes with a separator. Copies them to from/to (4 bytes each) when given.
+static bool find_route(const char *t, char *from, char *to)
 {
   for (const char *p = t; *p; p++)
   {
@@ -1164,9 +1165,21 @@ static bool has_route(const char *t)
       else if (q[0] == 't' && q[1] == 'o' && q[2] == ' ') { q += 3; separator = true; }
       else break;
     }
-    if (separator && is_upper_word_at(q, 3)) return true;
+    if (separator && is_upper_word_at(q, 3))
+    {
+      if (from) snprintf(from, 4, "%.3s", p);
+      if (to) snprintf(to, 4, "%.3s", q);
+      return true;
+    }
   }
   return false;
+}
+
+static bool has_route(const char *t) { return find_route(t, nullptr, nullptr); }
+
+bool df_extract_route(const char *title, char *from, char *to)
+{
+  return title && find_route(title, from, to);
 }
 
 bool df_is_flight_title(const char *t)
