@@ -269,6 +269,7 @@ void flight_refresh_screen()
 {
   bool active = flight_screen_active();
   if (active) flight_apply_to_ui();
+  if (home_flight_btn) (active ? lv_obj_clear_flag : lv_obj_add_flag)(home_flight_btn, LV_OBJ_FLAG_HIDDEN);
   if (!active) flight_alert_cancel();
   if (!active && current_screen == FLIGHT_SCREEN_INDEX && !in_settings) go_to_screen_blackout(0);
   else if (page_dots[0]) update_page_indicator(current_screen);

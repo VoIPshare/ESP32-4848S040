@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "2.8"
+#define FW_VERSION "2.9"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -54,6 +54,10 @@ enum WeatherIconType { WICON_CLEAR, WICON_PARTLY_CLOUDY, WICON_CLOUDY, WICON_FOG
 // the clock and the weather temperature - see lv_font_roboto_regular_86.c.
 extern "C" {
 extern const lv_font_t lv_font_roboto_regular_86;
+// Home screen shortcut icons (Material Design Icons) - see home_icons.c /
+// tools/make_home_icons.py.
+extern const lv_img_dsc_t home_icon_printer, home_icon_calendar, home_icon_server, home_icon_stocks,
+    home_icon_makerworld, home_icon_package, home_icon_flight;
 }
 
 #define GFX_BL 38
@@ -138,6 +142,12 @@ static lv_obj_t *home_min_label = NULL;
 static lv_obj_t *home_date_label = NULL;
 static lv_obj_t *home_next_event_lab = NULL; // "Next: ..." strip - populated by calendar.ino's update_home_next_event()
 static lv_obj_t *home_next_accent = NULL;    // its accent bar - orange while a flight is pinned there
+static lv_obj_t *home_flight_btn = NULL;     // shortcut to the Flight screen, only while it's available
+static lv_obj_t *home_shortcuts_row = NULL;
+static lv_obj_t *home_shortcuts_hotspot = NULL; // top-left tap target in "show on corner tap" mode
+static uint32_t home_shortcuts_until_ms = 0;    // corner mode: hide the row again at this time
+#define HOME_SHORTCUTS_SHOW_MS (10UL * 1000UL)
+enum { SHORTCUTS_ALWAYS = 0, SHORTCUTS_ON_TAP = 1, SHORTCUTS_OFF = 2 };
 static uint8_t demo_hour = 14, demo_min = 32, demo_sec = 0;
 // Weekday/month/day-of-month, set from the same NTP sync that corrects
 // demo_hour/min (see sync_clock_ntp()) - placeholder values below match the
@@ -295,7 +305,8 @@ struct DeviceSettings
   char tz_name[40] = "Europe/Rome"; // IANA-style zone name - see TZ_TABLE
   // "City", "City, CC" (2-letter country code) or "lat,lon" - a city is
   // looked up once with Open-Meteo's geocoding (see df_resolve_location()).
-  char weather_location[65] = "Milan, IT";
+  // Empty: the city of the time zone is used (see weather_location_effective()).
+  char weather_location[65] = "";
   char printer_name[32] = "My Printer"; // no reliable name field in Bambu's local MQTT report - user-entered
   char printer_ip[16] = "192.168.1.100";
   uint16_t printer_port = 8883;
@@ -314,6 +325,7 @@ struct DeviceSettings
   char aerodatabox_key[96] = ""; // RapidAPI key for AeroDataBox (live flight status, optional)
   uint8_t idle_return_home_min = 5; // one of IDLE_TIMEOUT_OPTIONS_MIN - see create_settings_screen()
   bool flight_alert = true; // show the Flight screen for 2 min when the flight's data changes
+  uint8_t home_shortcuts = SHORTCUTS_ON_TAP; // Home shortcut icons: SHORTCUTS_ALWAYS / _ON_TAP / _OFF
   // Proxmox VE cluster - see proxmox.ino. host is "ip-or-hostname:port"
   // (default port 8006); token_id is the full "user@realm!tokenname" from
   // Datacenter -> Permissions -> API Tokens; token_secret is the UUID shown
@@ -360,6 +372,13 @@ void clock_tick_cb(lv_timer_t *timer)
   // auto-opened it (that case is handled by the finish-triggered return
   // below instead), never while locked, and never while viewing the
   // Calendar day-detail screen (its own back button is the only exit).
+  // Corner-revealed shortcut icons: hide them again after 10 s.
+  if (home_shortcuts_until_ms != 0 && millis() >= home_shortcuts_until_ms)
+  {
+    home_shortcuts_until_ms = 0;
+    home_shortcuts_apply_mode();
+  }
+
   // Flight change alert over: back to whatever was showing before.
   if (flight_alert_until_ms != 0 && millis() >= flight_alert_until_ms) flight_alert_end(false);
 
@@ -518,6 +537,38 @@ void corner_tap_next_screen_cb(lv_event_t *e)
   bambu_screen_auto_opened = false;
   bambu_auto_return_home_at_ms = 0;
   go_to_screen_blackout(adjacent_screen(current_screen, +1));
+}
+
+// Shows/hides the shortcut row and the corner target per settings.home_shortcuts.
+void home_shortcuts_apply_mode()
+{
+  if (!home_shortcuts_row || !home_shortcuts_hotspot) return;
+  bool always = settings.home_shortcuts == SHORTCUTS_ALWAYS;
+  bool on_tap = settings.home_shortcuts == SHORTCUTS_ON_TAP;
+  bool showing = always || (on_tap && home_shortcuts_until_ms != 0);
+  (showing ? lv_obj_clear_flag : lv_obj_add_flag)(home_shortcuts_row, LV_OBJ_FLAG_HIDDEN);
+  (on_tap && !showing ? lv_obj_clear_flag : lv_obj_add_flag)(home_shortcuts_hotspot, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Corner tap in "show on corner tap" mode: the row appears for 10 seconds.
+void home_shortcuts_reveal_cb(lv_event_t *e)
+{
+  if (screen_locked) return;
+  home_shortcuts_until_ms = millis() + HOME_SHORTCUTS_SHOW_MS;
+  home_shortcuts_apply_mode();
+}
+
+// Home screen shortcut icons: jump straight to that screen.
+void home_shortcut_clicked_cb(lv_event_t *e)
+{
+  if (screen_locked) return;
+  uint8_t target = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+  if (!screen_available(target)) return;
+  flight_alert_cancel();
+  bambu_screen_auto_opened = false;
+  bambu_auto_return_home_at_ms = 0;
+  if (home_shortcuts_until_ms) { home_shortcuts_until_ms = 0; home_shortcuts_apply_mode(); }
+  go_to_screen_blackout(target);
 }
 
 // Tapping the Home screen's print-status badge jumps straight to the Bambu
@@ -813,6 +864,23 @@ void wifi_signal_apply_to_ui()
   if (wifi_no_signal_line) (wifi_signal_ui_connected ? lv_obj_add_flag : lv_obj_clear_flag)(wifi_no_signal_line, LV_OBJ_FLAG_HIDDEN);
 }
 
+// The weather location from the setup page, or - when it's empty - the
+// city of the time zone ("America/Toronto" -> "Toronto"). False if neither.
+bool weather_location_effective(char *buf, size_t n)
+{
+  if (settings.weather_location[0])
+  {
+    snprintf(buf, n, "%s", settings.weather_location);
+    return true;
+  }
+  const char *slash = strrchr(settings.tz_name, '/');
+  if (!slash || !slash[1]) return false;
+  snprintf(buf, n, "%s", slash + 1);
+  for (char *c = buf; *c; c++)
+    if (*c == '_') *c = ' ';
+  return true;
+}
+
 // Blocks for ~1-2s during the HTTPS GET - fine here since this now runs on
 // network_task, never on the LVGL-owning thread.
 void fetch_weather()
@@ -821,11 +889,18 @@ void fetch_weather()
   if (WiFi.status() != WL_CONNECTED) return;
 
   float lat, lon;
-  if (!df_resolve_location(settings.weather_location, &lat, &lon))
+  char location[65];
+  if (!weather_location_effective(location, sizeof(location)))
   {
-    Serial.printf("[Weather] Can't resolve location \"%s\"\n", settings.weather_location);
+    Serial.println("[Weather] No location set");
     return;
   }
+  if (!df_resolve_location(location, &lat, &lon))
+  {
+    Serial.printf("[Weather] Can't resolve location \"%s\"\n", location);
+    return;
+  }
+  Serial.printf("[Weather] Location \"%s\" (%.4f,%.4f)\n", location, lat, lon);
 
   char url[360];
   snprintf(url, sizeof(url),
@@ -902,8 +977,13 @@ void load_settings()
   if (prefs.isKey("wloc"))
     prefs.getString("wloc", settings.weather_location, sizeof(settings.weather_location));
   else if (prefs.isKey("lat")) // saved by older firmware as two numbers
-    snprintf(settings.weather_location, sizeof(settings.weather_location), "%.4f,%.4f",
-             prefs.getFloat("lat", 0), prefs.getFloat("lon", 0));
+  {
+    float lat = prefs.getFloat("lat", 0), lon = prefs.getFloat("lon", 0);
+    // Older firmware saved its Milan default even if never changed: ignore it.
+    bool old_default = fabsf(lat - 45.4642f) < 0.001f && fabsf(lon - 9.19f) < 0.001f;
+    if (!old_default)
+      snprintf(settings.weather_location, sizeof(settings.weather_location), "%.4f,%.4f", lat, lon);
+  }
   prefs.getString("pname", settings.printer_name, sizeof(settings.printer_name));
   prefs.getString("pip", settings.printer_ip, sizeof(settings.printer_ip));
   settings.printer_port = prefs.getUShort("pport", settings.printer_port);
@@ -920,6 +1000,7 @@ void load_settings()
   prefs.getString("adbkey", settings.aerodatabox_key, sizeof(settings.aerodatabox_key));
   settings.idle_return_home_min = prefs.getUChar("idlemin", settings.idle_return_home_min);
   settings.flight_alert = prefs.getBool("fltalert", settings.flight_alert);
+  settings.home_shortcuts = prefs.getUChar("shortcuts", settings.home_shortcuts);
   prefs.getString("pxhost", settings.proxmox_host, sizeof(settings.proxmox_host));
   prefs.getString("pxtok", settings.proxmox_token_id, sizeof(settings.proxmox_token_id));
   prefs.getString("pxsec", settings.proxmox_token_secret, sizeof(settings.proxmox_token_secret));
@@ -947,6 +1028,7 @@ void save_settings()
   prefs.putString("adbkey", settings.aerodatabox_key);
   prefs.putUChar("idlemin", settings.idle_return_home_min);
   prefs.putBool("fltalert", settings.flight_alert);
+  prefs.putUChar("shortcuts", settings.home_shortcuts);
   prefs.putString("pxhost", settings.proxmox_host);
   prefs.putString("pxtok", settings.proxmox_token_id);
   prefs.putString("pxsec", settings.proxmox_token_secret);
@@ -1027,12 +1109,31 @@ String build_settings_page()
       "</select>"
       "</fieldset>"
       "<fieldset><legend>Weather location</legend>"
-      "<label>City or coordinates</label><input type='text' name='wloc' placeholder='London, GB' value='");
+      "<label>City or coordinates</label><input type='text' name='wloc' placeholder='Empty: the time zone city' value='");
   page += html_escape(settings.weather_location);
   page += F(
       "'>"
       "<label style='margin-top:2px;font-size:11px'>A city, optionally with a 2-letter country code "
-      "(<i>London, GB</i>), or <i>latitude,longitude</i> (<i>51.51,-0.13</i>).</label>"
+      "(<i>Montreal, CA</i>), or <i>latitude,longitude</i> (<i>45.50,-73.57</i>). Empty uses the city of the "
+      "time zone above.</label>"
+      "</fieldset>"
+      "<fieldset><legend>Home screen</legend>"
+      "<label>Shortcut icons</label><select name='shortcuts'>");
+  {
+    static const char *SHORTCUT_MODES[] = {"Always", "Show on top-left corner tap", "Off"};
+    for (uint8_t i = 0; i < 3; i++)
+    {
+      page += "<option value='" + String(i) + "'";
+      if (settings.home_shortcuts == i) page += " selected";
+      page += ">";
+      page += SHORTCUT_MODES[i];
+      page += "</option>";
+    }
+  }
+  page += F(
+      "</select>"
+      "<label style='margin-top:2px;font-size:11px'>One icon per screen at the top of Home; tap one to jump there. "
+      "With \"corner tap\" they appear for 10 seconds.</label>"
       "</fieldset>"
       "<fieldset><legend>Bambu printer</legend>"
       "<label>Printer name</label><input type='text' name='pname' value='");
@@ -1173,6 +1274,7 @@ void handle_save_post()
   if (config_server.hasArg("mqtt_pass")) config_server.arg("mqtt_pass").toCharArray(settings.mqtt_pass, sizeof(settings.mqtt_pass));
   if (config_server.hasArg("ssid")) config_server.arg("ssid").toCharArray(settings.sta_ssid, sizeof(settings.sta_ssid));
   if (config_server.hasArg("pass")) config_server.arg("pass").toCharArray(settings.sta_pass, sizeof(settings.sta_pass));
+  if (config_server.hasArg("shortcuts")) settings.home_shortcuts = (uint8_t)constrain(config_server.arg("shortcuts").toInt(), 0, 2);
   if (config_server.hasArg("stocks")) config_server.arg("stocks").toCharArray(settings.stock_symbols, sizeof(settings.stock_symbols));
   for (int i = 0; i < ICS_MAX_FEEDS; i++)
   {
@@ -1798,7 +1900,7 @@ lv_obj_t *create_home_screen()
   lv_obj_set_flex_flow(time_row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_set_style_pad_column(time_row, 0, LV_PART_MAIN);
-  lv_obj_align(time_row, LV_ALIGN_CENTER, 0, -13);
+  lv_obj_align(time_row, LV_ALIGN_CENTER, 0, 2); // below the shortcut row
 
   lv_obj_t *hour_val = lv_label_create(time_row);
   lv_obj_set_width(hour_val, 117);
@@ -1827,15 +1929,70 @@ lv_obj_t *create_home_screen()
   lv_obj_set_style_bg_color(divider, COLOR_PRIMARY, LV_PART_MAIN);
   lv_obj_set_style_border_width(divider, 0, LV_PART_MAIN);
   lv_obj_set_style_radius(divider, 2, LV_PART_MAIN);
-  lv_obj_align(divider, LV_ALIGN_CENTER, 0, 43);
+  lv_obj_align(divider, LV_ALIGN_CENTER, 0, 57);
   lv_obj_clear_flag(divider, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t *date_val = lv_label_create(clock_panel);
   lv_label_set_text(date_val, "Saturday, August 15"); // placeholder until clock_apply_to_ui() runs post-NTP-sync
   lv_obj_set_style_text_color(date_val, lv_color_hex(0xB0BEC5), LV_PART_MAIN);
   lv_obj_set_style_text_font(date_val, &lv_font_montserrat_18, LV_PART_MAIN);
-  lv_obj_align(date_val, LV_ALIGN_CENTER, 0, 65);
+  lv_obj_align(date_val, LV_ALIGN_CENTER, 0, 77);
   home_date_label = date_val;
+
+  // Shortcut row: one icon per screen, top-left (the top-right corner is the
+  // Settings/next-screen hotspot, so the row stops short of it).
+  lv_obj_t *shortcuts = lv_obj_create(scr);
+  lv_obj_set_size(shortcuts, LV_SIZE_CONTENT, 42);
+  lv_obj_set_pos(shortcuts, 14, 8);
+  lv_obj_set_style_bg_opa(shortcuts, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(shortcuts, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(shortcuts, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(shortcuts, 8, LV_PART_MAIN);
+  lv_obj_set_flex_flow(shortcuts, LV_FLEX_FLOW_ROW);
+  lv_obj_clear_flag(shortcuts, LV_OBJ_FLAG_SCROLLABLE);
+  home_shortcuts_row = shortcuts;
+
+  static const struct { const lv_img_dsc_t *icon; uint8_t screen; } SHORTCUTS[] = {
+      {&home_icon_printer, 1}, {&home_icon_calendar, 2}, {&home_icon_server, 3}, {&home_icon_stocks, 4},
+      {&home_icon_makerworld, 5}, {&home_icon_package, 6}, {&home_icon_flight, FLIGHT_SCREEN_INDEX}};
+  for (size_t i = 0; i < sizeof(SHORTCUTS) / sizeof(SHORTCUTS[0]); i++)
+  {
+    bool flight = SHORTCUTS[i].screen == FLIGHT_SCREEN_INDEX;
+    lv_obj_t *btn = lv_obj_create(shortcuts);
+    lv_obj_set_size(btn, 42, 42);
+    lv_obj_set_style_radius(btn, 12, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x232D38), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x34424F), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(btn, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(btn, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_GESTURE_BUBBLE); // swiping over the row still changes screen
+    lv_obj_add_event_cb(btn, home_shortcut_clicked_cb, LV_EVENT_SHORT_CLICKED, (void *)(uintptr_t)SHORTCUTS[i].screen);
+
+    lv_obj_t *img = lv_img_create(btn);
+    lv_img_set_src(img, SHORTCUTS[i].icon);
+    lv_obj_set_style_img_recolor(img, flight ? COLOR_SECONDARY : COLOR_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_img_recolor_opa(img, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_center(img);
+    lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
+
+    if (flight)
+    {
+      home_flight_btn = btn;
+      lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN); // shown by flight_refresh_screen() while a flight is coming up
+    }
+  }
+
+  // "Show on corner tap" mode: an invisible top-left target reveals the row.
+  home_shortcuts_hotspot = lv_obj_create(scr);
+  lv_obj_set_size(home_shortcuts_hotspot, 110, 70);
+  lv_obj_set_pos(home_shortcuts_hotspot, 0, 0);
+  lv_obj_set_style_bg_opa(home_shortcuts_hotspot, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(home_shortcuts_hotspot, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(home_shortcuts_hotspot, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(home_shortcuts_hotspot, LV_OBJ_FLAG_GESTURE_BUBBLE);
+  lv_obj_add_event_cb(home_shortcuts_hotspot, home_shortcuts_reveal_cb, LV_EVENT_SHORT_CLICKED, NULL);
+  home_shortcuts_apply_mode();
 
   // ---- Weather panel: bottom 60% of the screen ----
   lv_obj_t *weather_panel = lv_obj_create(scr);

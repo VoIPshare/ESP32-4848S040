@@ -94,7 +94,7 @@ If you'd rather stay on LVGL 9.5+, you'll need to update the sketch's display-in
 
 ## Navigation
 
-- **Touch:** swipe left/right to change screen, or tap the top-right corner for the next screen (hold it 5 s for Settings). Hold the bottom-left corner 3 s to lock the current screen.
+- **Touch:** use the shortcut icons on Home (see the setup page), swipe left/right to change screen, or tap the top-right corner for the next screen (hold it 5 s for Settings). Hold the bottom-left corner 3 s to lock the current screen.
 
 ## Screens
 
@@ -121,6 +121,7 @@ Hold the top-right corner for 5 seconds to open Settings, turn on **Setup Access
 | **MakerWorld user ID** | The number in your profile's `/design-service/published/<number>/design` address. |
 | **PKGE API key** | From business.pkge.net → Company profile → API key. Add tracking numbers in the PKGE dashboard. Empty keeps the saved key, `-` removes it. |
 | **AeroDataBox API key** | Optional. Free key: rapidapi.com → AeroDataBox → Basic plan. Empty keeps the saved key, `-` removes it. |
+| **Home screen: shortcut icons** | Always, show on a tap of Home's top-left corner (10 s, default), or off. Tap an icon to jump to that screen. |
 | **Bambu printer / Proxmox** | As before. |
 
 Settings from older firmware are kept; the old latitude/longitude become the weather location. The old "Dashboard Data" (Apps Script) ID is no longer used.
