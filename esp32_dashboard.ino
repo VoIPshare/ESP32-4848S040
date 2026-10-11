@@ -7,8 +7,18 @@
 /*******************************************************************************
  * ESP32-4848S040 Multi-Screen Dashboard
  * LVGL 8.3.0 Compatible Version with ST7701S Support
- * 480x480 Display with 5 Swipeable Screens
+ * 480x480 Display with 7 Swipeable Screens
  ******************************************************************************/
+
+// Shown in the Serial log at boot; .github/workflows/compile.yml tags each
+// release with it, so bump it with every firmware change.
+#define FW_VERSION "2.0"
+
+// The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
+// ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
+#if !defined(CONFIG_IDF_TARGET_ESP32S3)
+#error "This dashboard only builds for the ESP32-S3 (ESP32-4848S040): select an ESP32-S3 board."
+#endif
 #include "Arduino_GFX_Library.h"
 #include <lvgl.h>
 #include <Wire.h>
@@ -22,6 +32,7 @@
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include "calendar_types.h"
+#include "direct_fetch.h"
 
 // Set to 0 to silence verbose diagnostic Serial output (raw JSON dumps,
 // parsed-field traces) - e.g. once a field mapping is confirmed working and
@@ -118,8 +129,8 @@ static lv_disp_drv_t disp_drv;
 #define COLOR_TEXT_MUTED lv_color_hex(0x8A97A0)
 #define COLOR_CLOUD lv_color_hex(0xECEFF1)
 
-// Screens: Home, Bambu printer, Calendar, Proxmox, Stocks, MakerWorld
-#define SCREEN_COUNT 6
+// Screens: Home, Bambu printer, Calendar, Proxmox, Stocks, MakerWorld, Packages
+#define SCREEN_COUNT 7
 static lv_obj_t *screens[SCREEN_COUNT];
 static uint8_t current_screen = 0;
 
@@ -129,6 +140,7 @@ static lv_obj_t *home_hour_label = NULL;
 static lv_obj_t *home_min_label = NULL;
 static lv_obj_t *home_date_label = NULL;
 static lv_obj_t *home_next_event_lab = NULL; // "Next: ..." strip - populated by calendar.ino's update_home_next_event()
+static lv_obj_t *home_next_accent = NULL;    // its accent bar - orange while a flight is pinned there
 static uint8_t demo_hour = 14, demo_min = 32, demo_sec = 0;
 // Weekday/month/day-of-month, set from the same NTP sync that corrects
 // demo_hour/min (see sync_clock_ntp()) - placeholder values below match the
@@ -228,12 +240,25 @@ static bool bambu_gave_up = false;
 static volatile bool stocks_needs_ui_refresh = false;
 static volatile bool calendar_needs_ui_refresh = false;
 static volatile bool makerworld_needs_ui_refresh = false;
-// Stocks/calendar/MakerWorld all come from one shared Apps Script endpoint
-// now (see webapp_data.ino) instead of three separate direct-to-API
-// fetches, so there's a single fetch cadence for all three. Also referenced
-// from network_task() below, which stays in this file - see the note above.
-static uint32_t last_dashboard_fetch_ms = 0;
-#define DASHBOARD_FETCH_INTERVAL_MS (5UL * 60UL * 1000UL)
+static volatile bool tracking_needs_ui_refresh = false;
+// Stocks/calendar/MakerWorld/packages/flights are each fetched directly from
+// their service by web_fetch.ino, which keeps its own per-source cadence.
+
+// Guards the data network_task copies in (calendar, stocks, MakerWorld,
+// packages, flight) against the LVGL thread reading it mid-copy. Recursive,
+// since calendar_apply_to_ui() calls update_home_next_event(), which locks
+// too. Created at the top of setup(), before anything can take it.
+static SemaphoreHandle_t data_mutex = NULL;
+
+void data_lock()
+{
+  if (data_mutex) xSemaphoreTakeRecursive(data_mutex, portMAX_DELAY);
+}
+
+void data_unlock()
+{
+  if (data_mutex) xSemaphoreGiveRecursive(data_mutex);
+}
 
 // Proxmox is a local-LAN fetch (no external rate limit to worry about, see
 // proxmox.ino), so it refreshes far more often than the Apps Script sources
@@ -254,8 +279,9 @@ static uint32_t last_proxmox_fetch_ms = 0;
 struct DeviceSettings
 {
   char tz_name[40] = "Europe/Rome"; // IANA-style zone name - see TZ_TABLE
-  float weather_lat = 45.4642f;
-  float weather_lon = 9.1900f;
+  // "City", "City, CC" (2-letter country code) or "lat,lon" - a city is
+  // looked up once with Open-Meteo's geocoding (see df_resolve_location()).
+  char weather_location[65] = "Milan, IT";
   char printer_name[32] = "My Printer"; // no reliable name field in Bambu's local MQTT report - user-entered
   char printer_ip[16] = "192.168.1.100";
   uint16_t printer_port = 8883;
@@ -264,12 +290,14 @@ struct DeviceSettings
   char sta_ssid[33] = "";
   char sta_pass[65] = "";
   bool auto_show_bambu_on_start = false;
-  // The deployment ID from the Google Apps Script web app URL
-  // (.../macros/s/<ID>/exec) that serves pre-aggregated stocks/calendar/
-  // MakerWorld data - see webapp_data.ino. Grants read access to whatever
-  // that script exposes, so treat it like a password (see
-  // build_settings_page()'s note).
-  char dashboard_script_id[100] = "";
+  // Fetched directly by web_fetch.ino / direct_fetch.cpp:
+  char stock_symbols[96] = "";  // Yahoo Finance symbols, comma separated: "AAPL,NVDA,^IXIC"
+  // iCal (.ics) feeds merged into the Calendar screen. A Google Calendar
+  // "secret address" works like a password, so the URLs are never logged.
+  char ics_urls[ICS_MAX_FEEDS][ICS_URL_MAX] = {"", "", ""};
+  char makerworld_uid[24] = ""; // numeric MakerWorld user ID
+  char pkge_api_key[96] = "";   // PKGE Business API key (package tracking)
+  char aerodatabox_key[96] = ""; // RapidAPI key for AeroDataBox (live flight status, optional)
   uint8_t idle_return_home_min = 5; // one of IDLE_TIMEOUT_OPTIONS_MIN - see create_settings_screen()
   // Proxmox VE cluster - see proxmox.ino. host is "ip-or-hostname:port"
   // (default port 8006); token_id is the full "user@realm!tokenname" from
@@ -293,6 +321,8 @@ void clock_tick_cb(lv_timer_t *timer)
     if (demo_hour >= 24) demo_hour = 0;
     lv_label_set_text_fmt(home_hour_label, "%02d", demo_hour);
     lv_label_set_text_fmt(home_min_label, "%02d", demo_min);
+    // Passed events drop off and flight countdowns tick, without a refetch.
+    update_home_next_event();
   }
 
   // Auto-hide the page-position dots after a minute of no touch activity.
@@ -695,11 +725,18 @@ void fetch_weather()
   last_weather_fetch_ms = millis();
   if (WiFi.status() != WL_CONNECTED) return;
 
+  float lat, lon;
+  if (!df_resolve_location(settings.weather_location, &lat, &lon))
+  {
+    Serial.printf("[Weather] Can't resolve location \"%s\"\n", settings.weather_location);
+    return;
+  }
+
   char url[192];
   snprintf(url, sizeof(url),
            "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
            "&current=temperature_2m,relative_humidity_2m,wind_speed_10m,uv_index,weather_code&timezone=auto",
-           settings.weather_lat, settings.weather_lon);
+           lat, lon);
 
   WiFiClientSecure client;
   client.setInsecure(); // read-only public API, no cert pinning needed
@@ -750,12 +787,18 @@ void fetch_weather()
 
 // Bambu backend + screen moved to bambu.ino (see that file's header comment
 // for why no #include is needed).
+// NVS keys for settings.ics_urls[] (max 15 chars each).
+static const char *ICS_PREF_KEYS[ICS_MAX_FEEDS] = {"ics0", "ics1", "ics2"};
+
 void load_settings()
 {
   prefs.begin("dash", true);
   prefs.getString("tzn", settings.tz_name, sizeof(settings.tz_name));
-  settings.weather_lat = prefs.getFloat("lat", settings.weather_lat);
-  settings.weather_lon = prefs.getFloat("lon", settings.weather_lon);
+  if (prefs.isKey("wloc"))
+    prefs.getString("wloc", settings.weather_location, sizeof(settings.weather_location));
+  else if (prefs.isKey("lat")) // saved by older firmware as two numbers
+    snprintf(settings.weather_location, sizeof(settings.weather_location), "%.4f,%.4f",
+             prefs.getFloat("lat", 0), prefs.getFloat("lon", 0));
   prefs.getString("pname", settings.printer_name, sizeof(settings.printer_name));
   prefs.getString("pip", settings.printer_ip, sizeof(settings.printer_ip));
   settings.printer_port = prefs.getUShort("pport", settings.printer_port);
@@ -764,7 +807,12 @@ void load_settings()
   prefs.getString("ssid", settings.sta_ssid, sizeof(settings.sta_ssid));
   prefs.getString("pass", settings.sta_pass, sizeof(settings.sta_pass));
   settings.auto_show_bambu_on_start = prefs.getBool("abos", settings.auto_show_bambu_on_start);
-  prefs.getString("dsid", settings.dashboard_script_id, sizeof(settings.dashboard_script_id));
+  prefs.getString("stocks", settings.stock_symbols, sizeof(settings.stock_symbols));
+  for (int i = 0; i < ICS_MAX_FEEDS; i++)
+    prefs.getString(ICS_PREF_KEYS[i], settings.ics_urls[i], sizeof(settings.ics_urls[i]));
+  prefs.getString("mwuid", settings.makerworld_uid, sizeof(settings.makerworld_uid));
+  prefs.getString("pkge", settings.pkge_api_key, sizeof(settings.pkge_api_key));
+  prefs.getString("adbkey", settings.aerodatabox_key, sizeof(settings.aerodatabox_key));
   settings.idle_return_home_min = prefs.getUChar("idlemin", settings.idle_return_home_min);
   prefs.getString("pxhost", settings.proxmox_host, sizeof(settings.proxmox_host));
   prefs.getString("pxtok", settings.proxmox_token_id, sizeof(settings.proxmox_token_id));
@@ -776,8 +824,7 @@ void save_settings()
 {
   prefs.begin("dash", false);
   prefs.putString("tzn", settings.tz_name);
-  prefs.putFloat("lat", settings.weather_lat);
-  prefs.putFloat("lon", settings.weather_lon);
+  prefs.putString("wloc", settings.weather_location);
   prefs.putString("pname", settings.printer_name);
   prefs.putString("pip", settings.printer_ip);
   prefs.putUShort("pport", settings.printer_port);
@@ -786,7 +833,12 @@ void save_settings()
   prefs.putString("ssid", settings.sta_ssid);
   prefs.putString("pass", settings.sta_pass);
   prefs.putBool("abos", settings.auto_show_bambu_on_start);
-  prefs.putString("dsid", settings.dashboard_script_id);
+  prefs.putString("stocks", settings.stock_symbols);
+  for (int i = 0; i < ICS_MAX_FEEDS; i++)
+    prefs.putString(ICS_PREF_KEYS[i], settings.ics_urls[i]);
+  prefs.putString("mwuid", settings.makerworld_uid);
+  prefs.putString("pkge", settings.pkge_api_key);
+  prefs.putString("adbkey", settings.aerodatabox_key);
   prefs.putUChar("idlemin", settings.idle_return_home_min);
   prefs.putString("pxhost", settings.proxmox_host);
   prefs.putString("pxtok", settings.proxmox_token_id);
@@ -868,13 +920,12 @@ String build_settings_page()
       "</select>"
       "</fieldset>"
       "<fieldset><legend>Weather location</legend>"
-      "<label>Latitude</label><input type='number' step='0.0001' name='lat' value='");
-  page += String(settings.weather_lat, 4);
-  page += F("'>"
-            "<label>Longitude</label><input type='number' step='0.0001' name='lon' value='");
-  page += String(settings.weather_lon, 4);
+      "<label>City or coordinates</label><input type='text' name='wloc' placeholder='London, GB' value='");
+  page += html_escape(settings.weather_location);
   page += F(
       "'>"
+      "<label style='margin-top:2px;font-size:11px'>A city, optionally with a 2-letter country code "
+      "(<i>London, GB</i>), or <i>latitude,longitude</i> (<i>51.51,-0.13</i>).</label>"
       "</fieldset>"
       "<fieldset><legend>Bambu printer</legend>"
       "<label>Printer name</label><input type='text' name='pname' value='");
@@ -897,16 +948,51 @@ String build_settings_page()
   page += F(
       "'>"
       "</fieldset>"
-      "<fieldset><legend>Dashboard Data</legend>"
-      "<label>Secret ID</label>"
-      "<input type='text' name='dsid' value='");
-  page += html_escape(settings.dashboard_script_id);
+      "<fieldset><legend>Stocks</legend>"
+      "<label>Symbols (up to 7, comma separated)</label>"
+      "<input type='text' name='stocks' placeholder='AAPL,NVDA,^IXIC' value='");
+  page += html_escape(settings.stock_symbols);
   page += F(
       "'>"
-      "<label style='margin-top:2px;font-size:11px'>Stocks, calendar, and MakerWorld stats all come from one "
-      "Google Apps Script web app. Deploy it, then copy just the ID out of its URL - the part between "
-      "\"/macros/s/\" and \"/exec\" in https://script.google.com/macros/s/&lt;ID&gt;/exec. This grants read "
-      "access to whatever the script exposes, so treat it like a password.</label>"
+      "<label style='margin-top:2px;font-size:11px'>Yahoo Finance symbols. Indexes start with ^.</label>"
+      "</fieldset>"
+      "<fieldset><legend>Calendar</legend>");
+  for (int i = 0; i < ICS_MAX_FEEDS; i++)
+  {
+    page += "<label>iCal URL " + String(i + 1) + "</label><input type='text' name='";
+    page += ICS_PREF_KEYS[i];
+    page += "' placeholder='https://calendar.google.com/calendar/ical/.../basic.ics' value='";
+    page += html_escape(settings.ics_urls[i]);
+    page += "'>";
+  }
+  page += F(
+      "<label style='margin-top:2px;font-size:11px'>Up to 3 .ics links, merged. Google Calendar: Settings -&gt; "
+      "your calendar -&gt; Integrate calendar -&gt; Secret address in iCal format (treat it like a password). "
+      "Flights in a title like <i>AC871 YUL-&gt;YYZ</i> are pinned on the Home screen with a countdown.</label>"
+      "</fieldset>"
+      "<fieldset><legend>MakerWorld</legend>"
+      "<label>User ID</label><input type='text' name='mwuid' inputmode='numeric' value='");
+  page += html_escape(settings.makerworld_uid);
+  page += F(
+      "'>"
+      "<label style='margin-top:2px;font-size:11px'>The number in your profile's published-models address "
+      "(/design-service/published/&lt;number&gt;/design).</label>"
+      "</fieldset>"
+      "<fieldset><legend>Package tracking</legend>"
+      "<label>PKGE API key</label><input type='password' name='pkge' autocomplete='off' placeholder='");
+  page += settings.pkge_api_key[0] ? F("saved - leave empty to keep") : F("not set");
+  page += F(
+      "'>"
+      "<label style='margin-top:2px;font-size:11px'>From business.pkge.net -&gt; Company profile -&gt; API key. "
+      "Add tracking numbers in the PKGE dashboard. Enter - to remove the key.</label>"
+      "</fieldset>"
+      "<fieldset><legend>Live flight status (optional)</legend>"
+      "<label>AeroDataBox API key</label><input type='password' name='adbkey' autocomplete='off' placeholder='");
+  page += settings.aerodatabox_key[0] ? F("saved - leave empty to keep") : F("not set");
+  page += F(
+      "'>"
+      "<label style='margin-top:2px;font-size:11px'>Free key: rapidapi.com -&gt; AeroDataBox -&gt; Basic plan. "
+      "On the day of a flight in your calendar, shows delays, gate and departed/landed. Enter - to remove the key.</label>"
       "</fieldset>"
       "<fieldset><legend>Proxmox cluster</legend>"
       "<label>Host (ip:port)</label><input type='text' name='pxhost' placeholder='192.168.1.50:8006' value='");
@@ -967,8 +1053,12 @@ void handle_scan()
 void handle_save_post()
 {
   if (config_server.hasArg("tz")) config_server.arg("tz").toCharArray(settings.tz_name, sizeof(settings.tz_name));
-  if (config_server.hasArg("lat")) settings.weather_lat = config_server.arg("lat").toFloat();
-  if (config_server.hasArg("lon")) settings.weather_lon = config_server.arg("lon").toFloat();
+  if (config_server.hasArg("wloc"))
+  {
+    String loc = config_server.arg("wloc");
+    loc.trim();
+    loc.toCharArray(settings.weather_location, sizeof(settings.weather_location));
+  }
   if (config_server.hasArg("pname")) config_server.arg("pname").toCharArray(settings.printer_name, sizeof(settings.printer_name));
   if (config_server.hasArg("pip")) config_server.arg("pip").toCharArray(settings.printer_ip, sizeof(settings.printer_ip));
   if (config_server.hasArg("pport")) settings.printer_port = config_server.arg("pport").toInt();
@@ -976,7 +1066,35 @@ void handle_save_post()
   if (config_server.hasArg("mqtt_pass")) config_server.arg("mqtt_pass").toCharArray(settings.mqtt_pass, sizeof(settings.mqtt_pass));
   if (config_server.hasArg("ssid")) config_server.arg("ssid").toCharArray(settings.sta_ssid, sizeof(settings.sta_ssid));
   if (config_server.hasArg("pass")) config_server.arg("pass").toCharArray(settings.sta_pass, sizeof(settings.sta_pass));
-  if (config_server.hasArg("dsid")) config_server.arg("dsid").toCharArray(settings.dashboard_script_id, sizeof(settings.dashboard_script_id));
+  if (config_server.hasArg("stocks")) config_server.arg("stocks").toCharArray(settings.stock_symbols, sizeof(settings.stock_symbols));
+  for (int i = 0; i < ICS_MAX_FEEDS; i++)
+  {
+    if (!config_server.hasArg(ICS_PREF_KEYS[i])) continue;
+    String url = config_server.arg(ICS_PREF_KEYS[i]);
+    url.trim();
+    url.toCharArray(settings.ics_urls[i], sizeof(settings.ics_urls[i]));
+  }
+  if (config_server.hasArg("mwuid"))
+  {
+    String uid = config_server.arg("mwuid");
+    uid.trim();
+    uid.toCharArray(settings.makerworld_uid, sizeof(settings.makerworld_uid));
+  }
+  // API keys: empty keeps the saved key (the page never echoes it back), "-" removes it.
+  if (config_server.hasArg("pkge"))
+  {
+    String key = config_server.arg("pkge");
+    key.trim();
+    if (key == "-") settings.pkge_api_key[0] = '\0';
+    else if (key.length() > 0) key.toCharArray(settings.pkge_api_key, sizeof(settings.pkge_api_key));
+  }
+  if (config_server.hasArg("adbkey"))
+  {
+    String key = config_server.arg("adbkey");
+    key.trim();
+    if (key == "-") settings.aerodatabox_key[0] = '\0';
+    else if (key.length() > 0) key.toCharArray(settings.aerodatabox_key, sizeof(settings.aerodatabox_key));
+  }
   if (config_server.hasArg("pxhost")) config_server.arg("pxhost").toCharArray(settings.proxmox_host, sizeof(settings.proxmox_host));
   if (config_server.hasArg("pxtok")) config_server.arg("pxtok").toCharArray(settings.proxmox_token_id, sizeof(settings.proxmox_token_id));
   if (config_server.hasArg("pxsec")) config_server.arg("pxsec").toCharArray(settings.proxmox_token_secret, sizeof(settings.proxmox_token_secret));
@@ -989,7 +1107,7 @@ void handle_save_post()
   // A full reboot - rather than the previous piecemeal "leave the AP,
   // reconnect Wi-Fi, resync the clock, refetch the calendar" apply-in-place
   // dance - guarantees every setting (Wi-Fi, timezone, MQTT, calendar,
-  // MakerWorld ID, ...) gets applied through the one code path that already
+  // MakerWorld ID, API keys, ...) gets applied through the one code path that already
   // knows how (setup()), instead of needing a bespoke live-apply step added
   // here for every new setting. delay() first so the response above
   // actually reaches the browser before the connection drops.
@@ -1202,7 +1320,7 @@ bool sync_clock_ntp()
     clock_needs_ui_refresh = true;
     // The Calendar screen's month grid (today ring, day-of-week layout) is
     // derived from these same fields, so it needs the same refresh - even
-    // when no Google Calendar URL is configured, the grid itself should
+    // when no iCal URL is configured, the grid itself should
     // still track the real date instead of staying on its placeholder.
     calendar_needs_ui_refresh = true;
     clock_synced_once = true;
@@ -1612,7 +1730,9 @@ lv_obj_t *create_home_screen()
   // row. A subtle rounded card with a colored accent bar reads better than
   // plain centered text. Text is set by calendar.ino's
   // update_home_next_event(), which runs on the same triggers as
-  // calendar_apply_to_ui() (NTP sync, fresh dashboard-data fetch).
+  // calendar_apply_to_ui() (NTP sync, fresh calendar fetch) and once a
+  // minute from clock_tick_cb(). A flight in the next 24 hours is pinned
+  // here with a countdown (and live status with an AeroDataBox key).
   lv_obj_t *next_card = lv_obj_create(weather_panel);
   lv_obj_set_size(next_card, 440, 32);
   lv_obj_set_style_bg_color(next_card, lv_color_hex(0x232D38), LV_PART_MAIN);
@@ -1632,6 +1752,7 @@ lv_obj_t *create_home_screen()
   lv_obj_set_style_radius(next_accent, 2, LV_PART_MAIN);
   lv_obj_clear_flag(next_accent, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_align(next_accent, LV_ALIGN_LEFT_MID, 12, 0);
+  home_next_accent = next_accent;
 
   lv_obj_t *next_event_lab = lv_label_create(next_card);
   lv_label_set_text(next_event_lab, "");
@@ -1651,6 +1772,7 @@ lv_obj_t *create_home_screen()
 // Screen 3 (Proxmox) moved to proxmox.ino.
 // Screen 4 (Stocks) moved to stocks.ino.
 // Screen 5 (MakerWorld) moved to makerworld.ino.
+// Screen 6 (Packages) lives in tracking.ino.
 
 // ==================== Settings screen ====================
 lv_obj_t *create_settings_screen()
@@ -1966,8 +2088,8 @@ void network_task(void *param)
       Serial.printf("[Heap] free=%u  largest_block=%u  min_free_ever=%u\n",
                      ESP.getFreeHeap(), ESP.getMaxAllocHeap(), ESP.getMinFreeHeap());
       fetch_weather();
-      fetch_dashboard_data();
       proxmox_fetch();
+      direct_fetch_all();
     }
     // Retry every 15s until the first sync succeeds (e.g. NTP wasn't
     // reachable yet right after boot); once synced, settle into the normal
@@ -1979,7 +2101,7 @@ void network_task(void *param)
       sync_clock_ntp();
     }
     if (wifi_connected && millis() - last_weather_fetch_ms > WEATHER_FETCH_INTERVAL_MS) fetch_weather();
-    if (wifi_connected && millis() - last_dashboard_fetch_ms > DASHBOARD_FETCH_INTERVAL_MS) fetch_dashboard_data();
+    if (wifi_connected) direct_fetch_maintain();
     if (wifi_connected && millis() - last_proxmox_fetch_ms > PROXMOX_FETCH_INTERVAL_MS) proxmox_fetch();
     if (millis() - last_wifi_signal_sample_ms > WIFI_SIGNAL_SAMPLE_INTERVAL_MS)
     {
@@ -1997,7 +2119,9 @@ void setup()
 {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n\n=== Dashboard starting ===");
+  Serial.println("\n\n=== Dashboard starting (firmware " FW_VERSION ") ===");
+
+  data_mutex = xSemaphoreCreateRecursiveMutex();
 
   load_settings();
 
@@ -2064,6 +2188,7 @@ void setup()
     screens[3] = create_proxmox_screen();
     screens[4] = create_stocks_screen();
     screens[5] = create_makerworld_screen();
+    screens[6] = create_tracking_screen();
     settings_screen = create_settings_screen();
     cal_day_screen = create_calendar_day_screen();
 
@@ -2087,7 +2212,9 @@ void setup()
     // Network I/O (Wi-Fi/AP servers, HTTPS fetches, MQTT) runs on core 0 so
     // it can never stall LVGL rendering/touch on this core - see
     // network_task() above for why and the thread-safety rules it follows.
-    xTaskCreatePinnedToCore(network_task, "network", 8192, NULL, 1, NULL, 0);
+    // 12 KB stack: the iCal/MakerWorld/PKGE parsers keep their buffers on
+    // the heap, but the TLS client + JSON filters still need some headroom.
+    xTaskCreatePinnedToCore(network_task, "network", 12288, NULL, 1, NULL, 0);
 
     Serial.println("Setup done");
   }
@@ -2104,6 +2231,7 @@ void loop()
   if (stocks_needs_ui_refresh) { stocks_needs_ui_refresh = false; stocks_apply_to_ui(); }
   if (calendar_needs_ui_refresh) { calendar_needs_ui_refresh = false; calendar_apply_to_ui(); }
   if (makerworld_needs_ui_refresh) { makerworld_needs_ui_refresh = false; makerworld_apply_to_ui(); }
+  if (tracking_needs_ui_refresh) { tracking_needs_ui_refresh = false; tracking_apply_to_ui(); }
   if (bambu_needs_ui_refresh) { bambu_needs_ui_refresh = false; bambu_apply_to_ui(); }
   if (proxmox_needs_ui_refresh) { proxmox_needs_ui_refresh = false; proxmox_apply_to_ui(); }
   if (wifi_signal_needs_ui_refresh) { wifi_signal_needs_ui_refresh = false; wifi_signal_apply_to_ui(); }

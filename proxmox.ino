@@ -73,7 +73,7 @@ void proxmox_format_uptime(uint32_t sec, char *buf, size_t buflen)
 }
 
 // Runs on network_task, same blocking-HTTPS-fetch trade-off as
-// fetch_weather()/fetch_dashboard_data() - this is a local LAN call though,
+// fetch_weather()/the web_fetch.ino fetches - this is a local LAN call though,
 // so it's normally much faster than either of those.
 void proxmox_fetch()
 {

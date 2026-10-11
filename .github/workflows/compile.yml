@@ -1,0 +1,158 @@
+name: Compile ESP32-S3 Dashboard
+
+on:
+  workflow_dispatch:
+
+env:
+  ESP32_CORE_VERSION: 3.3.12
+  ARDUINO_CLI_VERSION: 1.5.1
+  # ESP32-4848S040: ESP32-S3 with 16 MB flash and 8 MB octal PSRAM. The sketch
+  # refuses to build for any other chip (#error in esp32_dashboard.ino).
+  FQBN: esp32:esp32:esp32s3
+  BOARD_OPTIONS: PSRAM=opi,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB
+
+jobs:
+  # --------------------------------------------------
+  # Read FW_VERSION from esp32_dashboard.ino, refuse a version already released
+  # --------------------------------------------------
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Read firmware version
+        id: read
+        run: |
+          VERSION=$(sed -n 's/^#define FW_VERSION *"\([^"]*\)".*/\1/p' esp32_dashboard.ino)
+          if ! [[ "$VERSION" =~ ^[0-9A-Za-z._-]+$ ]]; then
+            echo "::error::Could not read FW_VERSION from esp32_dashboard.ino (got '$VERSION')"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/firmware-$VERSION" >/dev/null; then
+            echo "::error::firmware-$VERSION is already released: bump FW_VERSION in esp32_dashboard.ino"
+            exit 1
+          fi
+          echo "Firmware version $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # ------------------------------
+      # Cache Arduino packages
+      # ------------------------------
+      - name: Cache Arduino packages
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.arduino15/packages
+            ~/.arduino15/staging
+            ~/Arduino/libraries
+          # Bump the version list here together with the installs below.
+          key: arduino-${{ runner.os }}-esp32-${{ env.ESP32_CORE_VERSION }}-lvgl-8.3.11-gfxarduino-1.6.9-gt911-1.0.2-adagfx-1.12.6-busio-1.17.4-json-7.4.3-pubsub-2.8
+
+      # ------------------------------
+      # Arduino CLI
+      # ------------------------------
+      # arduino/setup-arduino-cli still runs on Node.js 20: use the official install script.
+      - name: Setup Arduino CLI
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
+            | BINDIR="$HOME/.local/bin" sh -s "$ARDUINO_CLI_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install ESP32 Arduino Core
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@${{ env.ESP32_CORE_VERSION }}
+
+      # ------------------------------
+      # Libraries
+      # ------------------------------
+      # LVGL must stay on 8.3: the sketch uses the 8.x display/driver API.
+      - name: Install required libraries
+        run: |
+          arduino-cli lib install \
+            "lvgl@8.3.11" \
+            "GFX Library for Arduino@1.6.9" \
+            "TAMC_GT911@1.0.2" \
+            "Adafruit GFX Library@1.12.6" \
+            "Adafruit BusIO@1.17.4" \
+            "ArduinoJson@7.4.3" \
+            "PubSubClient@2.8"
+
+      # LVGL 8 looks for lv_conf.h next to its own library folder.
+      - name: Install lv_conf.h
+        run: cp ci/lv_conf.h ~/Arduino/libraries/lv_conf.h
+
+      - name: Patch Adafruit_BusIO for ESP32 core 3.x
+        run: |
+          FILE="$HOME/Arduino/libraries/Adafruit_BusIO/Adafruit_SPIDevice.h"
+          sed -i 's/SPI_BITORDER_MSBFIRST = SPI_MSBFIRST/SPI_BITORDER_MSBFIRST = MSBFIRST/' "$FILE"
+          sed -i 's/SPI_BITORDER_LSBFIRST = SPI_LSBFIRST/SPI_BITORDER_LSBFIRST = LSBFIRST/' "$FILE"
+
+      # ------------------------------
+      # Compile
+      # ------------------------------
+      - name: Compile sketch
+        run: |
+          arduino-cli compile \
+            --fqbn ${{ env.FQBN }} \
+            --board-options ${{ env.BOARD_OPTIONS }} \
+            --export-binaries \
+            --output-dir build_esp32s3 \
+            ./esp32_dashboard.ino
+
+      - name: Rename firmware
+        run: |
+          mkdir -p firmware
+          cp build_esp32s3/*.bin firmware/
+          cd firmware
+          for f in *.bin; do
+            mv "$f" "ESP32S3-4848S040-$f"
+          done
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ESP32S3-4848S040-Firmware
+          path: firmware
+          retention-days: 90
+
+  # --------------------------------------------------
+  # Create release only if the build succeeded
+  # --------------------------------------------------
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v8
+        with:
+          path: firmware
+
+      - name: Create release and upload firmware
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: firmware-${{ needs.version.outputs.version }}
+          name: ESP32-S3 Dashboard Firmware ${{ needs.version.outputs.version }}
+          files: firmware/**/*.bin

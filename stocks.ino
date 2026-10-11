@@ -2,12 +2,10 @@
 // Split out of esp32_dashboard.ino: the Stocks screen, plus stocks_apply_to_ui()
 // to push fetched quotes into it.
 //
-// This used to fetch Yahoo Finance's "spark" endpoint directly, for
-// whatever tickers were typed into a settings field. That's gone now -
-// the stocks[] array is instead populated by webapp_data.ino's single
-// shared fetch of a Google Apps Script endpoint, which already decides
-// which symbols to track and returns their quotes pre-fetched. This file
-// only knows how to render stocks[], not fetch it.
+// stocks[] is filled by web_fetch.ino with Yahoo Finance quotes for the
+// symbols typed on the Wi-Fi setup page (df_fetch_stocks() in
+// direct_fetch.cpp). This file only knows how to render stocks[], not
+// fetch it.
 //
 // This is an Arduino multi-tab sketch: all .ino files in this folder are
 // concatenated into one translation unit at build time, so no #include of

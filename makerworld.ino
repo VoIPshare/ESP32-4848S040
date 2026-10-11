@@ -1,13 +1,10 @@
 // ==================== MakerWorld design stats ====================
 // Renders aggregate engagement stats (likes/downloads/prints/collections/
-// boosts) for a MakerWorld design. This used to fetch MakerWorld's raw
-// design-service API directly on-device - gone now, since that endpoint
-// bundles full per-instance metadata alongside the numbers we actually
-// want and routinely runs 500KB-900KB+ per fetch, far more than fits in
-// ESP32 heap. makerworld_stats is instead populated by webapp_data.ino's
-// single shared fetch of a Google Apps Script endpoint that already sums
-// the totals server-side. This file only knows how to render
-// makerworld_stats, not fetch it.
+// boosts) summed over every published design of a MakerWorld user.
+// makerworld_stats is filled by web_fetch.ino: df_fetch_makerworld() in
+// direct_fetch.cpp streams Bambu's design-service answer (~1 MB) through a
+// JSON filter that keeps only the counters, so it never has to fit in RAM.
+// This file only knows how to render makerworld_stats, not fetch it.
 //
 // This is an Arduino multi-tab sketch: all .ino files in this folder are
 // concatenated into one translation unit at build time, so no #include of
@@ -34,8 +31,8 @@ static lv_obj_t *makerworld_collections_val = NULL;
 static lv_obj_t *makerworld_boosts_val = NULL;
 // Distinguishes "haven't tried fetching yet" from "tried and it failed" -
 // without this, the status label had no way to tell those apart and a
-// design ID that was actually saved could sit stuck on the create-time
-// placeholder text ("No design ID set...") until a fetch happened to succeed.
+// user ID that was actually saved could sit stuck on the create-time
+// placeholder text until a fetch happened to succeed.
 static bool makerworld_fetch_attempted = false;
 
 // Abbreviates large counts (12345 -> "12.3K", 2500000 -> "2.5M") so they fit
@@ -51,8 +48,8 @@ void makerworld_apply_to_ui()
 {
   if (makerworld_status_lab)
   {
-    if (!settings.dashboard_script_id[0])
-      lv_label_set_text(makerworld_status_lab, "No Dashboard Data API configured - set it on the Wi-Fi setup page");
+    if (!settings.makerworld_uid[0])
+      lv_label_set_text(makerworld_status_lab, "No MakerWorld user ID - set it on the Wi-Fi setup page");
     else if (!makerworld_fetch_attempted)
       lv_label_set_text(makerworld_status_lab, "Fetching MakerWorld stats...");
     else if (!makerworld_stats.valid)
@@ -90,7 +87,7 @@ lv_obj_t *create_makerworld_screen()
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
 
   makerworld_status_lab = lv_label_create(scr);
-  lv_label_set_text(makerworld_status_lab, "No Dashboard Data API configured - set it on the Wi-Fi setup page");
+  lv_label_set_text(makerworld_status_lab, "");
   lv_obj_set_style_text_color(makerworld_status_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
   lv_obj_set_style_text_font(makerworld_status_lab, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_width(makerworld_status_lab, 420);
@@ -131,8 +128,8 @@ lv_obj_t *create_makerworld_screen()
 
   // Syncs the status label with whatever's actually in settings right now -
   // without this the label stayed on its hardcoded creation-time text
-  // ("No design ID set...") until a fetch happened to complete, even if a
-  // design ID had already been loaded from saved settings.
+  // until a fetch happened to complete, even if a user ID had already been
+  // loaded from saved settings.
   makerworld_apply_to_ui();
 
   return scr;

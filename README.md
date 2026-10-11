@@ -1,13 +1,21 @@
 # ESP32-4848S040 Multi-Screen Dashboard
 
-A dashboard application for the 480×480 4-inch ESP32-4848S040 display, built with LVGL, featuring four scrollable screens.
+A dashboard application for the 480×480 4-inch ESP32-4848S040 display (ESP32-S3), built with LVGL, featuring seven swipeable screens. The ESP32 fetches every widget's data itself, directly from each service: no Google Apps Script or other server in between (same approach as the [e-ink dashboard](https://github.com/VoIPshare/ESP32-eInk-Dashboard)).
 
 ## Features
 
-- 🌡️ **Climate Control** — temperature, humidity, and clock display
-- 🖨️ **BambuLab Printer** — print status, progress, and temperature monitoring
-- 🖥️ **Proxmox Cluster** — VM/container host monitoring (CPU, RAM, status per node)
-- 📦 **Package Tracking** — delivery status with estimated dates
+| Screen | Data source | Needs | Refresh |
+| --- | --- | --- | --- |
+| Home: clock, weather, next event | NTP, [Open-Meteo](https://open-meteo.com/), your iCal feeds | city or coordinates | weather every 10 min |
+| Bambu Lab printer | the printer, over local MQTT | printer IP, serial, access code | live |
+| Calendar (month + day detail) | up to 3 iCal (`.ics`) feeds, merged, recurrence included | iCal URL | every 30 min |
+| Proxmox cluster | Proxmox VE API | host + API token | every 20 s |
+| Stocks (up to 7) | Yahoo Finance | ticker symbols | every 10 min |
+| MakerWorld stats | Bambu's MakerWorld API | MakerWorld user ID | every hour |
+| Packages (up to 5) | [PKGE](https://business.pkge.net) | PKGE API key | every 2 hours |
+| Flight on the Home strip (optional live status) | calendar titles, [AeroDataBox](https://rapid.aerodatabox.com) via RapidAPI | RapidAPI key (optional) | every 30 min on the day, 10 min around departure/landing |
+
+Flights in your calendar (titles like `AC871 YUL->YYZ`, `TS399 PUJ->YUL` or anything containing "flight") are pinned on the Home strip from 24 hours before departure, with a countdown. With an AeroDataBox key the strip also shows delays, gate, "In the air" and "Landed".
 
 Dark theme, color-coded status indicators (green/yellow/red), 60 FPS LVGL rendering.
 
@@ -27,7 +35,7 @@ Dark theme, color-coded status indicators (green/yellow/red), 60 FPS LVGL render
    https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
    ```
 2. Tools → Board → Boards Manager → search "ESP32" → install "esp32 by Espressif Systems"
-3. Select Board: `ESP32S3 Dev Module`, Upload Speed: `921600`
+3. Select Board: `ESP32S3 Dev Module`, PSRAM: `OPI PSRAM`, Flash Size: `16MB`, Partition Scheme: `16M Flash (3MB APP/9.9MB FATFS)`, Upload Speed: `115200` (faster speeds can fail on this board's USB-serial chip). The sketch refuses to build for any chip other than the ESP32-S3.
 
 ### 2. Install Libraries
 
@@ -124,11 +132,25 @@ Edit `config.h` to customize:
 #define PRINTER_UPDATE_INTERVAL 2000
 ```
 
-## Adding Real Data
+## Setup page
 
-`data_sources.h` currently returns placeholder/static values. To connect real data (sensors, BambuLab, Proxmox, delivery carriers, WiFi/HTTPS setup, error handling, rate limiting), see **[API_INTEGRATION_GUIDE.md](API_INTEGRATION_GUIDE.md)** — it has complete code samples for each integration.
+Hold the top-right corner for 5 seconds to open Settings, turn on **Setup Access Point**, join `ESP32-Dashboard-Setup` (password `12345678`) and browse to `http://192.168.4.1`. Saving restarts the device.
 
-For package tracking, stocks, calendar, flight status, and weather in one call, see **[google_apps_script/](google_apps_script/)** — a Google Apps Script backend you deploy behind a Google Sheet and hit from the ESP32 with a single HTTP GET.
+| Field | What to enter |
+| --- | --- |
+| **Weather location** | A city, optionally with a 2-letter country code (`London, GB`), or `latitude,longitude`. A city is looked up once with Open-Meteo's geocoding. |
+| **Stocks** | Up to 7 Yahoo Finance symbols, comma separated: `AAPL,NVDA,^IXIC`. |
+| **Calendar** | Up to 3 `.ics` links. Google Calendar: Settings → your calendar → Integrate calendar → *Secret address in iCal format* (treat it like a password). |
+| **MakerWorld user ID** | The number in your profile's `/design-service/published/<number>/design` address. |
+| **PKGE API key** | From business.pkge.net → Company profile → API key. Add tracking numbers in the PKGE dashboard. Empty keeps the saved key, `-` removes it. |
+| **AeroDataBox API key** | Optional. Free key: rapidapi.com → AeroDataBox → Basic plan. Empty keeps the saved key, `-` removes it. |
+| **Bambu printer / Proxmox** | As before. |
+
+Settings from older firmware are kept; the old latitude/longitude become the weather location. The old "Dashboard Data" (Apps Script) ID is no longer used.
+
+## Continuous integration
+
+`.github/workflows/compile.yml` (run it from the Actions tab) builds the firmware for the ESP32-S3 only, with LVGL 8.3.11 and `ci/lv_conf.h`, reads `FW_VERSION` from `esp32_dashboard.ino`, and on `main` publishes the binaries as release `firmware-<version>`. Bump `FW_VERSION` before each release; the workflow refuses a version that's already released.
 
 ## Hardware Reference
 
@@ -266,15 +288,15 @@ Arduino_GFX  — renders to 480×480 RGB display at 60 FPS
 
 ```
 esp32_dashboard/
-├── esp32_dashboard.ino          ← Main sketch (upload this)
-├── config.h                     ← Colors, pins, update intervals
-├── data_sources.h               ← Data structures & API placeholders
-├── utils.h                      ← Helper functions
-├── README.md                    ← This file
-├── API_INTEGRATION_GUIDE.md     ← Real data source integration (sensors, BambuLab, Proxmox, carriers)
-└── google_apps_script/          ← Optional Google Sheets–backed JSON API (tracking, stocks, calendar, flight, weather)
-    ├── Code.gs
-    └── README.md
+├── esp32_dashboard.ino          ← Main sketch (upload this): display, Home, settings, Wi-Fi portal, network task
+├── bambu.ino / calendar.ino / proxmox.ino / stocks.ino / makerworld.ino / tracking.ino  ← one tab per screen
+├── web_fetch.ino                ← schedules the direct fetches and copies results into the screens
+├── direct_fetch.cpp/.h          ← Open-Meteo geocoding, Yahoo, iCal parser, MakerWorld, PKGE, AeroDataBox
+├── calendar_types.h             ← calendar/flight structs shared by the tabs and direct_fetch.cpp
+├── ci/lv_conf.h                 ← LVGL 8.3 config used by the CI build
+├── .github/workflows/compile.yml← ESP32-S3 build + release (manual trigger)
+├── config.h / data_sources.h / utils.h / API_INTEGRATION_GUIDE.md  ← original templates, not used by the sketch
+└── README.md                    ← This file
 ```
 
 ## Resources
