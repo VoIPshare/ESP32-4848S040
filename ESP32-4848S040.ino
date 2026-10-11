@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.2"
+#define FW_VERSION "3.3"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -688,7 +688,7 @@ void create_nav_menu()
 
   nav_menu_card = lv_obj_create(layer);
   lv_obj_set_size(nav_menu_card, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-  lv_obj_set_pos(nav_menu_card, 10, 10);
+  lv_obj_align(nav_menu_card, LV_ALIGN_TOP_MID, 0, 10); // stays centered as the Flight icon comes and goes
   lv_obj_set_style_bg_color(nav_menu_card, lv_color_hex(0x10181F), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(nav_menu_card, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_border_color(nav_menu_card, lv_color_hex(0x34424F), LV_PART_MAIN);
@@ -2123,11 +2123,11 @@ lv_obj_t *create_home_screen()
   lv_obj_align(date_val, LV_ALIGN_CENTER, 0, 77);
   home_date_label = date_val;
 
-  // Shortcut row ("always on Home" mode): one icon per screen, between the
-  // top-left menu corner (x < 80) and the top-right Settings/next corner (x > 390).
+  // Shortcut row ("always on Home" mode): one icon per screen, centered
+  // between the top-left menu corner (x < 80) and the top-right corner (x > 390).
   lv_obj_t *shortcuts = lv_obj_create(scr);
   lv_obj_set_size(shortcuts, LV_SIZE_CONTENT, 38);
-  lv_obj_set_pos(shortcuts, 82, 10);
+  lv_obj_align(shortcuts, LV_ALIGN_TOP_MID, 0, 10); // all 7 icons: x 89-391
   lv_obj_set_style_bg_opa(shortcuts, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(shortcuts, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(shortcuts, 0, LV_PART_MAIN);
