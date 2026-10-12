@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.12"
+#define FW_VERSION "3.13"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -1198,7 +1198,7 @@ void weather_apply_to_ui()
   {
     if (weather_data.has_daily)
       lv_label_set_text_fmt(weather_extra_lab, "%s %.0f\xC2\xB0  \xE2\x80\xA2  %s %.0f\xC2\xB0  %s %.0f\xC2\xB0", tr(S_FEELS),
-                            weather_data.feels, weather_data.tmax, weather_data.tmin);
+                            weather_data.feels, tr(S_HIGH), weather_data.tmax, tr(S_LOW), weather_data.tmin);
     else
       lv_label_set_text_fmt(weather_extra_lab, "%s %.0f\xC2\xB0", tr(S_FEELS), weather_data.feels);
   }
