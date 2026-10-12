@@ -200,7 +200,7 @@ Then in an automation: `action: rest_command.dashboard_message` with `data: {mes
 - **From the browser:** on the setup page, pick the `ESP32S3-4848S040-ESP32-4848S040.ino.bin` file from a release (not the `merged` one) and press **Upload firmware**.
 - **By USB:** as in [Installation](#installation), or flash the `merged` file at address 0 with esptool.
 
-The screen shows "Updating firmware" for a moment, then goes dark until the display restarts with the new version (about a minute). Writing the flash makes this panel flicker whatever it shows, so the backlight stays off meanwhile. Settings are kept.
+The screen shows "Updating firmware - the screen will go black for about 90 seconds" for a few seconds, then stays black until the display restarts with the new version. Writing the flash makes this panel flicker whatever it shows, so the backlight stays off meanwhile. Settings are kept.
 
 A watchdog restarts the display by itself if it ever freezes. Unplanned restarts (crash, watchdog, power dip) are counted and shown on the Settings screen.
 

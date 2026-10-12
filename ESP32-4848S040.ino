@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.10"
+#define FW_VERSION "3.11"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -218,7 +218,7 @@ static volatile uint32_t ota_started_ms = 0;
 // Writing flash keeps the panel from reading its picture, so it flickers
 // whatever is on it: after showing the card for a moment the backlight goes
 // off until the restart (see backlight_update()).
-#define OTA_DARK_AFTER_MS 2500
+#define OTA_DARK_AFTER_MS 4000
 
 // Why the board last restarted, when it wasn't planned (see restart_reason_init()).
 static const char *restart_reason = "";
@@ -1762,7 +1762,8 @@ String build_settings_page()
       "onsubmit=\"this.querySelector('button').disabled=true;this.querySelector('button').textContent='Uploading...'\">"
       "<fieldset><legend>Firmware update</legend>"
       "<label>Running version " FW_VERSION ". Pick a <i>.ino.bin</i> from the GitHub release "
-      "(not the merged one) - the device restarts when it's done.</label>"
+      "(not the merged one). The screen goes black for about 90 seconds while it installs, then the "
+      "device restarts.</label>"
       "<input type='file' name='fw' accept='.bin' required>"
       "</fieldset>"
       "<button type='submit'>Upload firmware</button>"
