@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.5"
+#define FW_VERSION "3.6"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -23,11 +23,14 @@
 #include <Preferences.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <Update.h>
+#include "bootloader_random.h"
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <esp32s3/rom/cache.h> // Cache_WriteBack_Addr() - see my_disp_flush()
 #include "calendar_types.h"
 #include "direct_fetch.h"
+#include "gh_update.h"
 
 // Set to 0 to silence verbose diagnostic Serial output (raw JSON dumps,
 // parsed-field traces) - e.g. once a field mapping is confirmed working and
@@ -143,8 +146,7 @@ static lv_disp_drv_t disp_drv;
 static lv_obj_t *screens[SCREEN_COUNT];
 static uint8_t current_screen = 0;
 
-// Dynamic demo clock on the Home screen (no NTP wired up yet, so this is a
-// free-running tick, not wall-clock time) - lets you see it actually working.
+// Home screen clock and date labels (see clock_tick_cb()/clock_apply_to_ui()).
 static lv_obj_t *home_hour_label = NULL;
 static lv_obj_t *home_min_label = NULL;
 static lv_obj_t *home_date_label = NULL;
@@ -163,12 +165,16 @@ static lv_obj_t *nav_menu_btn[SCREEN_COUNT] = {NULL};
 static uint32_t nav_menu_until_ms = 0;
 #define NAV_MENU_SHOW_MS (10UL * 1000UL)
 enum { SHORTCUTS_ALWAYS = 0, SHORTCUTS_ON_TAP = 1, SHORTCUTS_OFF = 2 };
-static uint8_t demo_hour = 14, demo_min = 32, demo_sec = 0;
-// Weekday/month/day-of-month, set from the same NTP sync that corrects
-// demo_hour/min (see sync_clock_ntp()) - placeholder values below match the
-// date label's old hardcoded text until the first sync lands.
-static uint8_t demo_wday = 6, demo_mday = 15, demo_mon = 7; // tm_wday/tm_mon convention: Sun=0, Jan=0
-static uint16_t demo_year = 2026; // full year (not tm_year's since-1900 form), also set in sync_clock_ntp()
+enum { UPDATE_NOTIFY = 0, UPDATE_AUTO = 1, UPDATE_OFF = 2 };
+// Local time shown on Home and used by the Calendar. Once NTP has synced,
+// clock_tick_cb() reads the system time every second (so midnight, DST and
+// a busy UI never leave it behind); before that it just counts ticks from
+// these placeholders. Only written on the LVGL thread.
+static uint8_t clock_hour = 14, clock_min = 32, clock_sec = 0;
+static uint8_t clock_wday = 6, clock_mday = 15, clock_mon = 7; // tm_wday/tm_mon convention: Sun=0, Jan=0
+static uint16_t clock_year = 2026; // full year (not tm_year's since-1900 form)
+static volatile bool clock_needs_ui_refresh = false; // set by sync_clock_ntp() on network_task
+static volatile bool clock_synced_once = false;
 
 // Live-updated weather widgets on the Home screen (see fetch_weather()).
 static lv_obj_t *weather_temp_lab = NULL;
@@ -204,7 +210,7 @@ static uint32_t pin_press_start_ms = 0;
 static bool pin_press_fired = false;
 static bool screen_pinned = false;
 
-// Wi-Fi signal indicator (top-left, always-on-top layer, see
+// Wi-Fi signal indicator (top-right, always-on-top layer, see
 // create_wifi_signal_indicator()) - four ascending bars filled up to the
 // current RSSI-derived level, plus a red diagonal strike across all-dim bars
 // when not connected. Same "top layer object, visible on every screen"
@@ -349,6 +355,19 @@ struct DeviceSettings
   uint8_t idle_return_home_min = 5; // one of IDLE_TIMEOUT_OPTIONS_MIN - see create_settings_screen()
   bool flight_alert = true; // show the Flight screen for 2 min when the flight's data changes
   bool wifi_icon_autohide = true; // Wi-Fi icon only on Home, for 20 s - see wifi_indicator_update_visibility()
+  // Night dimming (see backlight_update()): from night_start to night_end
+  // (local hours, may wrap past midnight) the backlight drops to
+  // night_level % after 30 s without a touch; 0 = off. A touch wakes it.
+  bool night_dim = false;
+  uint8_t night_start = 23;
+  uint8_t night_end = 7;
+  uint8_t night_level = 10;
+  uint8_t day_level = 100; // normal brightness, %
+  // GitHub release updates (see gh_update_maintain()): UPDATE_NOTIFY shows
+  // an icon on Home to accept/skip, UPDATE_AUTO installs by itself,
+  // UPDATE_OFF never checks on its own (the Settings button still works).
+  uint8_t update_mode = UPDATE_NOTIFY;
+  char update_skip[16] = ""; // version the user chose to skip
   uint8_t home_shortcuts = SHORTCUTS_ON_TAP; // SHORTCUTS_ALWAYS (icons on Home) / _ON_TAP (top-left menu) / _OFF
   // Proxmox VE cluster - see proxmox.ino. host is "ip-or-hostname:port"
   // (default port 8006); token_id is the full "user@realm!tokenname" from
@@ -371,21 +390,32 @@ void clock_tick_cb(lv_timer_t *timer)
     rgb_panel_resync(rgbpanel);
   }
 
-  demo_sec++;
-  if (demo_sec >= 60)
+  uint8_t prev_min = clock_min, prev_mday = clock_mday;
+  if (!clock_read_local())
   {
-    demo_sec = 0;
-    demo_min++;
-    if (demo_min >= 60) { demo_min = 0; demo_hour++; }
-    if (demo_hour >= 24) demo_hour = 0;
-    lv_label_set_text_fmt(home_hour_label, "%02d", demo_hour);
-    lv_label_set_text_fmt(home_min_label, "%02d", demo_min);
+    // Not synced yet: free-running placeholder.
+    if (++clock_sec >= 60)
+    {
+      clock_sec = 0;
+      if (++clock_min >= 60) { clock_min = 0; if (++clock_hour >= 24) clock_hour = 0; }
+    }
+  }
+  if (clock_min != prev_min)
+  {
+    lv_label_set_text_fmt(home_hour_label, "%02d", clock_hour);
+    lv_label_set_text_fmt(home_min_label, "%02d", clock_min);
     // Passed events drop off and flight countdowns tick, without a refetch.
     update_home_next_event();
     flight_refresh_screen();
   }
+  if (clock_mday != prev_mday)
+  {
+    clock_apply_to_ui();     // the date line
+    calendar_apply_to_ui();  // the month grid's "today" ring (and the month itself on the 1st)
+  }
 
   wifi_indicator_update_visibility();
+  backlight_update();
 
   // Auto-hide the page-position dots after 10 s of no touch activity (a
   // touch brings them back - see my_touchpad_read()).
@@ -465,13 +495,54 @@ void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color
   lv_disp_flush_ready(disp);
 }
 
+// ==================== Backlight / night dimming ====================
+#define BACKLIGHT_PWM_HZ 5000
+#define NIGHT_DIM_IDLE_MS (30UL * 1000UL)
+static uint8_t backlight_level = 100; // %, as last written
+static bool touch_swallow = false;    // a wake-up touch on a dark screen: ignored until released
+
+void backlight_set(uint8_t pct)
+{
+#ifdef GFX_BL
+  backlight_level = pct;
+  ledcWrite(GFX_BL, (uint32_t)pct * 255 / 100);
+#endif
+}
+
+bool night_now()
+{
+  if (!settings.night_dim || !clock_synced_once) return false;
+  uint8_t s = settings.night_start, e = settings.night_end, h = clock_hour;
+  if (s == e) return false;
+  return s < e ? (h >= s && h < e) : (h >= s || h < e); // e.g. 23 -> 7 wraps past midnight
+}
+
+// Once a second from clock_tick_cb(), and right away on a touch.
+void backlight_update()
+{
+  bool dim = night_now() && millis() - last_activity_ms > NIGHT_DIM_IDLE_MS;
+  uint8_t want = dim ? settings.night_level : settings.day_level;
+  if (want != backlight_level) backlight_set(want);
+}
+
 /* Touchpad read */
 void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
 {
   ts.read();
+  if (ts.isTouched && (touch_swallow || backlight_level == 0))
+  {
+    // Screen was off: this touch only wakes it - nothing underneath gets pressed.
+    touch_swallow = true;
+    last_activity_ms = millis();
+    backlight_update();
+    data->state = LV_INDEV_STATE_REL;
+    return;
+  }
+  touch_swallow = false;
   if (ts.isTouched)
   {
     last_activity_ms = millis();
+    if (backlight_level != settings.day_level) backlight_update();
     if (page_dots_row && !in_settings && !in_calendar_day) lv_obj_clear_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
 
     lv_coord_t bx = map(ts.points[0].x, TOUCH_MAP_X1, TOUCH_MAP_X2, 0, gfx->width() - 1);
@@ -831,7 +902,10 @@ void create_next_hotspot()
 }
 
 #define AP_SSID "ESP32-Dashboard-Setup"
-#define AP_PASSWORD "12345678"
+// Setup AP password: random, made once per device and kept in NVS (see
+// ap_password_init()), shown on the Settings screen while the AP is on -
+// so joining it needs someone standing at the display.
+static char ap_password[9] = "";
 #define AP_IP_STR "192.168.4.1"
 
 static Preferences prefs;
@@ -1077,6 +1151,7 @@ void wifi_signal_apply_to_ui()
     wifi_icon_until_ms = millis() + WIFI_ICON_SHOW_MS;
   }
   wifi_indicator_update_visibility();
+  if (in_settings) settings_info_update();
 }
 
 // Always visible with auto-hide off. With it on: only on Home, and there
@@ -1094,6 +1169,7 @@ void wifi_indicator_update_visibility()
   bool strike = show && !wifi_signal_ui_connected;
   if (wifi_no_signal_line && strike == lv_obj_has_flag(wifi_no_signal_line, LV_OBJ_FLAG_HIDDEN))
     (strike ? lv_obj_clear_flag : lv_obj_add_flag)(wifi_no_signal_line, LV_OBJ_FLAG_HIDDEN);
+  update_icon_refresh(); // same "only on Home" rule
 }
 
 // The weather location from the setup page, or - when it's empty - the
@@ -1233,6 +1309,13 @@ void load_settings()
   settings.idle_return_home_min = prefs.getUChar("idlemin", settings.idle_return_home_min);
   settings.flight_alert = prefs.getBool("fltalert", settings.flight_alert);
   settings.wifi_icon_autohide = prefs.getBool("wifihide", settings.wifi_icon_autohide);
+  settings.night_dim = prefs.getBool("ndim", settings.night_dim);
+  settings.night_start = prefs.getUChar("nstart", settings.night_start);
+  settings.night_end = prefs.getUChar("nend", settings.night_end);
+  settings.night_level = prefs.getUChar("nlevel", settings.night_level);
+  settings.day_level = prefs.getUChar("dlevel", settings.day_level);
+  settings.update_mode = prefs.getUChar("updmode", settings.update_mode);
+  prefs.getString("updskip", settings.update_skip, sizeof(settings.update_skip));
   settings.home_shortcuts = prefs.getUChar("shortcuts", settings.home_shortcuts);
   prefs.getString("pxhost", settings.proxmox_host, sizeof(settings.proxmox_host));
   prefs.getString("pxtok", settings.proxmox_token_id, sizeof(settings.proxmox_token_id));
@@ -1262,6 +1345,13 @@ void save_settings()
   prefs.putUChar("idlemin", settings.idle_return_home_min);
   prefs.putBool("fltalert", settings.flight_alert);
   prefs.putBool("wifihide", settings.wifi_icon_autohide);
+  prefs.putBool("ndim", settings.night_dim);
+  prefs.putUChar("nstart", settings.night_start);
+  prefs.putUChar("nend", settings.night_end);
+  prefs.putUChar("nlevel", settings.night_level);
+  prefs.putUChar("dlevel", settings.day_level);
+  prefs.putUChar("updmode", settings.update_mode);
+  prefs.putString("updskip", settings.update_skip);
   prefs.putUChar("shortcuts", settings.home_shortcuts);
   prefs.putString("pxhost", settings.proxmox_host);
   prefs.putString("pxtok", settings.proxmox_token_id);
@@ -1369,6 +1459,42 @@ String build_settings_page()
       "<label style='margin-top:2px;font-size:11px'>One icon per screen; tap one to jump there. A tap on the "
       "top-left corner of any screen opens them as a menu (closes after 10 seconds).</label>"
       "</fieldset>"
+      "<fieldset><legend>Display brightness</legend>"
+      "<label>Brightness (%)</label><input type='number' min='5' max='100' name='dlevel' value='");
+  page += String(settings.day_level);
+  page += F("'>"
+            "<label><input type='checkbox' name='ndim' value='1' style='width:auto'");
+  if (settings.night_dim) page += F(" checked");
+  page += F("> Dim at night</label>"
+            "<input type='hidden' name='ndim_form' value='1'>"
+            "<label>Night from (hour, 0-23)</label><input type='number' min='0' max='23' name='nstart' value='");
+  page += String(settings.night_start);
+  page += F("'><label>Night until (hour, 0-23)</label><input type='number' min='0' max='23' name='nend' value='");
+  page += String(settings.night_end);
+  page += F("'><label>Night brightness (%, 0 = screen off)</label><input type='number' min='0' max='100' name='nlevel' value='");
+  page += String(settings.night_level);
+  page += F(
+      "'>"
+      "<label style='margin-top:2px;font-size:11px'>Between those hours the screen dims after 30 seconds without a "
+      "touch; a touch brings it back (with the screen off, that first touch only wakes it).</label>"
+      "</fieldset>"
+      "<fieldset><legend>Firmware updates from GitHub</legend>"
+      "<label>When a new release is out</label><select name='updmode'>");
+  {
+    static const char *UPDATE_MODES[] = {"Show an icon on Home - I choose to install or skip", "Install automatically", "Don't check (Settings -> Check update only)"};
+    for (uint8_t i = 0; i < 3; i++)
+    {
+      page += "<option value='" + String(i) + "'";
+      if (settings.update_mode == i) page += " selected";
+      page += ">";
+      page += UPDATE_MODES[i];
+      page += "</option>";
+    }
+  }
+  page += F(
+      "</select>"
+      "<label style='margin-top:2px;font-size:11px'>Checked once a day against github.com/" GH_REPO " releases.</label>"
+      "</fieldset>"
       "<fieldset><legend>Bambu printer</legend>"
       "<label>Printer name</label><input type='text' name='pname' value='");
   page += html_escape(settings.printer_name);
@@ -1455,6 +1581,15 @@ String build_settings_page()
       "</fieldset>"
       "<button type='submit'>Save</button>"
       "</form>"
+      "<form method='POST' action='/update' enctype='multipart/form-data' "
+      "onsubmit=\"this.querySelector('button').disabled=true;this.querySelector('button').textContent='Uploading...'\">"
+      "<fieldset><legend>Firmware update</legend>"
+      "<label>Running version " FW_VERSION ". Pick a <i>.ino.bin</i> from the GitHub release "
+      "(not the merged one) - the device restarts when it's done.</label>"
+      "<input type='file' name='fw' accept='.bin' required>"
+      "</fieldset>"
+      "<button type='submit'>Upload firmware</button>"
+      "</form>"
       "<script>"
       "var saved='");
   page += js_escape(settings.sta_ssid);
@@ -1508,6 +1643,12 @@ void handle_save_post()
   if (config_server.hasArg("mqtt_pass")) config_server.arg("mqtt_pass").toCharArray(settings.mqtt_pass, sizeof(settings.mqtt_pass));
   if (config_server.hasArg("ssid")) config_server.arg("ssid").toCharArray(settings.sta_ssid, sizeof(settings.sta_ssid));
   if (config_server.hasArg("pass")) config_server.arg("pass").toCharArray(settings.sta_pass, sizeof(settings.sta_pass));
+  if (config_server.hasArg("updmode")) settings.update_mode = (uint8_t)constrain(config_server.arg("updmode").toInt(), 0, 2);
+  if (config_server.hasArg("ndim_form")) settings.night_dim = config_server.hasArg("ndim"); // unchecked boxes aren't sent
+  if (config_server.hasArg("nstart")) settings.night_start = (uint8_t)constrain(config_server.arg("nstart").toInt(), 0, 23);
+  if (config_server.hasArg("nend")) settings.night_end = (uint8_t)constrain(config_server.arg("nend").toInt(), 0, 23);
+  if (config_server.hasArg("nlevel")) settings.night_level = (uint8_t)constrain(config_server.arg("nlevel").toInt(), 0, 100);
+  if (config_server.hasArg("dlevel")) settings.day_level = (uint8_t)constrain(config_server.arg("dlevel").toInt(), 5, 100);
   if (config_server.hasArg("shortcuts")) settings.home_shortcuts = (uint8_t)constrain(config_server.arg("shortcuts").toInt(), 0, 2);
   if (config_server.hasArg("stocks")) config_server.arg("stocks").toCharArray(settings.stock_symbols, sizeof(settings.stock_symbols));
   for (int i = 0; i < ICS_MAX_FEEDS; i++)
@@ -1559,9 +1700,129 @@ void handle_save_post()
   ESP.restart();
 }
 
+// Firmware upload from the setup page (see build_settings_page()). Runs on
+// network_task; the screen shows "Updating firmware" via ota_apply_to_ui().
+static volatile bool ota_in_progress = false;
+static volatile uint8_t ota_percent = 0;
+static volatile bool ota_needs_ui_refresh = false;
+
+// Updates from GitHub releases (gh_update.cpp): checked once a day and from
+// the Settings screen's Update button, installed only from that button.
+enum { GH_IDLE, GH_CHECKING, GH_UP_TO_DATE, GH_AVAILABLE, GH_INSTALLING, GH_FAILED };
+static volatile uint8_t gh_state = GH_IDLE;
+static volatile bool gh_check_request = false;
+static volatile bool gh_install_request = false;
+static volatile bool gh_needs_ui_refresh = false;
+static char gh_latest[16] = "";
+static char gh_error[48] = "";
+static uint32_t last_gh_check_ms = 0;
+#define GH_CHECK_INTERVAL_MS (24UL * 60UL * 60UL * 1000UL)
+
+void gh_progress(int done, int total)
+{
+  uint8_t pct = total > 0 ? (uint8_t)(done * 100LL / total) : 0;
+  if (pct != ota_percent) { ota_percent = pct; ota_needs_ui_refresh = true; }
+}
+
+// network_task side: run whatever the UI asked for.
+void gh_update_maintain()
+{
+  if (gh_install_request && gh_state != GH_AVAILABLE) gh_install_request = false; // stale tap
+  bool due = settings.update_mode != UPDATE_OFF &&
+             (last_gh_check_ms == 0 || millis() - last_gh_check_ms > GH_CHECK_INTERVAL_MS);
+  if (gh_install_request && gh_state == GH_AVAILABLE)
+  {
+    gh_install_request = false;
+    gh_state = GH_INSTALLING;
+    ota_in_progress = true;
+    ota_percent = 0;
+    ota_needs_ui_refresh = true;
+    gh_needs_ui_refresh = true;
+    gh_install(gh_latest, gh_progress, gh_error, sizeof(gh_error)); // restarts on success
+    ota_in_progress = false;
+    ota_needs_ui_refresh = true;
+    gh_state = GH_FAILED;
+    gh_needs_ui_refresh = true;
+    return;
+  }
+  if (!gh_check_request && !due) return;
+  bool manual = gh_check_request;
+  gh_check_request = false;
+  last_gh_check_ms = millis();
+  gh_state = GH_CHECKING;
+  gh_needs_ui_refresh = true;
+  char v[sizeof(gh_latest)];
+  if (!gh_latest_version(v, sizeof(v)))
+  {
+    snprintf(gh_error, sizeof(gh_error), "Couldn't reach GitHub");
+    gh_state = GH_FAILED;
+  }
+  else
+  {
+    memcpy(gh_latest, v, sizeof(gh_latest));
+    gh_state = gh_version_newer(gh_latest, FW_VERSION) ? GH_AVAILABLE : GH_UP_TO_DATE;
+    Serial.printf("[Update] latest %s, running " FW_VERSION "\n", gh_latest);
+    // Automatic mode: a scheduled check that finds a release installs it
+    // right away (the next pass of this function does it).
+    if (gh_state == GH_AVAILABLE && settings.update_mode == UPDATE_AUTO && !manual) gh_install_request = true;
+  }
+  gh_needs_ui_refresh = true;
+}
+
+void handle_update_upload()
+{
+  HTTPUpload &up = config_server.upload();
+  if (up.status == UPLOAD_FILE_START)
+  {
+    Serial.printf("[OTA] receiving %s\n", up.filename.c_str());
+    ota_in_progress = true;
+    ota_percent = 0;
+    ota_needs_ui_refresh = true;
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
+  }
+  else if (up.status == UPLOAD_FILE_WRITE)
+  {
+    if (Update.isRunning() && Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
+    // Content-Length covers the whole multipart body - close enough for a progress bar.
+    size_t total = config_server.clientContentLength();
+    uint8_t pct = total ? (uint8_t)min<size_t>(99, Update.progress() * 100 / total) : 0;
+    if (pct != ota_percent) { ota_percent = pct; ota_needs_ui_refresh = true; }
+  }
+  else if (up.status == UPLOAD_FILE_END)
+  {
+    if (Update.end(true)) Serial.printf("[OTA] %u bytes written\n", (unsigned)up.totalSize);
+    else Update.printError(Serial);
+  }
+  else if (up.status == UPLOAD_FILE_ABORTED)
+  {
+    Update.abort();
+    Serial.println("[OTA] upload aborted");
+  }
+}
+
+void handle_update_done()
+{
+  bool ok = !Update.hasError() && Update.isFinished();
+  config_server.send(200, "text/html",
+                     ok ? "<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding-top:60px'>"
+                          "<h2 style='color:#00BCD4'>Updated</h2><p>The device is restarting with the new firmware.</p></body></html>"
+                        : "<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding-top:60px'>"
+                          "<h2 style='color:#EF5350'>Update failed</h2><p>Nothing was changed. Check that the file is the "
+                          "<i>.ino.bin</i> for this board and try again.</p></body></html>");
+  if (ok)
+  {
+    Serial.println("[OTA] done - restarting");
+    delay(1000);
+    ESP.restart();
+  }
+  ota_in_progress = false;
+  ota_needs_ui_refresh = true;
+}
+
 void start_config_server()
 {
   config_server.on("/", handle_root);
+  config_server.on("/update", HTTP_POST, handle_update_done, handle_update_upload);
   config_server.on("/scan", handle_scan);
   config_server.on("/save", HTTP_POST, handle_save_post);
   // Catch-all: iOS/Android/Windows each probe a different well-known URL
@@ -1587,6 +1848,9 @@ static lv_obj_t *ap_switch;
 static lv_obj_t *auto_bambu_switch;
 static lv_obj_t *flight_alert_switch;
 static lv_obj_t *wifi_autohide_switch;
+static lv_obj_t *settings_info_lab;
+static lv_obj_t *update_btn;
+static lv_obj_t *update_btn_lab;
 static lv_obj_t *ap_status_lab;
 static lv_obj_t *idle_timeout_dd;
 // Selectable idle-return-to-Home timeouts, in minutes - index into this
@@ -1608,7 +1872,7 @@ void update_ap_status_label()
 {
   if (ap_enabled)
   {
-    lv_label_set_text_fmt(ap_status_lab, "On - %s / %s (%s)", AP_SSID, AP_PASSWORD, AP_IP_STR);
+    lv_label_set_text_fmt(ap_status_lab, "On - %s / %s (%s)", AP_SSID, ap_password, AP_IP_STR);
   }
   else
   {
@@ -1628,6 +1892,25 @@ void close_settings_screen()
 // LVGL thread - it's not called from network_task/handle_save_post, since a
 // web-form Save now reboots the device instead of applying settings live
 // (see handle_save_post()).
+void ap_password_init()
+{
+  prefs.begin("dash", false);
+  prefs.getString("appass", ap_password, sizeof(ap_password));
+  if (strlen(ap_password) != 8)
+  {
+    static const char ALPHABET[] = "abcdefghjkmnpqrstuvwxyz23456789"; // no 0/o, 1/l/i look-alikes
+    // esp_random() is only truly random with the radio on; otherwise borrow
+    // the bootloader's entropy source (it must not run while Wi-Fi is on).
+    bool radio_off = WiFi.getMode() == WIFI_OFF;
+    if (radio_off) bootloader_random_enable();
+    for (int i = 0; i < 8; i++) ap_password[i] = ALPHABET[esp_random() % (sizeof(ALPHABET) - 1)];
+    if (radio_off) bootloader_random_disable();
+    ap_password[8] = '\0';
+    prefs.putString("appass", ap_password);
+  }
+  prefs.end();
+}
+
 void set_ap_enabled(bool on)
 {
   if (on == ap_enabled) return;
@@ -1639,7 +1922,8 @@ void set_ap_enabled(bool on)
     // the default AP IP is already 192.168.4.1. Matches the known-working
     // pattern from the earlier e-paper project; the extra config calls were
     // one more thing that could go wrong for no benefit.
-    bool ok = WiFi.softAP(AP_SSID, AP_PASSWORD);
+    if (!ap_password[0]) ap_password_init();
+    bool ok = WiFi.softAP(AP_SSID, ap_password);
     start_config_server();
     Serial.printf("AP %s - SSID: %s  IP: %s  free heap: %u\n",
                    ok ? "started" : "FAILED TO START",
@@ -1749,13 +2033,10 @@ void on_wifi_event(WiFiEvent_t event, WiFiEventInfo_t info)
   }
 }
 
-static volatile bool clock_needs_ui_refresh = false;
-static bool clock_synced_once = false;
-
-// Pulls current time over NTP and updates the demo clock's running state.
-// Runs on network_task - only touches plain vars + a flag; the Home screen
-// labels are updated from loop() (the LVGL-owning thread) when
-// clock_needs_ui_refresh is set, via clock_apply_to_ui(). Returns whether it
+// Pulls current time over NTP into the system clock. Runs on network_task -
+// only sets flags; the Home screen labels are updated from loop() (the
+// LVGL-owning thread) when clock_needs_ui_refresh is set, via
+// clock_apply_to_ui(). Returns whether it
 // succeeded so network_task can retry sooner than the normal hourly cadence
 // while it hasn't gotten a first successful sync yet (e.g. right after boot,
 // if Wi-Fi/NTP isn't reachable yet on the first attempt).
@@ -1771,13 +2052,6 @@ bool sync_clock_ntp()
   struct tm timeinfo;
   if (getLocalTime(&timeinfo, 5000))
   {
-    demo_hour = timeinfo.tm_hour;
-    demo_min = timeinfo.tm_min;
-    demo_sec = timeinfo.tm_sec;
-    demo_wday = timeinfo.tm_wday;
-    demo_mday = timeinfo.tm_mday;
-    demo_mon = timeinfo.tm_mon;
-    demo_year = timeinfo.tm_year + 1900;
     clock_needs_ui_refresh = true;
     // The Calendar screen's month grid (today ring, day-of-week layout) is
     // derived from these same fields, so it needs the same refresh - even
@@ -1803,11 +2077,30 @@ static const char *WEEKDAY_NAMES[7] = {"Sunday", "Monday", "Tuesday", "Wednesday
 static const char *MONTH_NAMES[12] = {"January", "February", "March", "April", "May", "June",
                                        "July", "August", "September", "October", "November", "December"};
 
+// Copies the system's local time into clock_* - true when it's set.
+bool clock_read_local()
+{
+  if (!clock_synced_once) return false;
+  struct tm t;
+  time_t now = time(nullptr);
+  localtime_r(&now, &t);
+  if (t.tm_year < 120) return false;
+  clock_hour = t.tm_hour;
+  clock_min = t.tm_min;
+  clock_sec = t.tm_sec;
+  clock_wday = t.tm_wday;
+  clock_mday = t.tm_mday;
+  clock_mon = t.tm_mon;
+  clock_year = t.tm_year + 1900;
+  return true;
+}
+
 void clock_apply_to_ui()
 {
-  if (home_hour_label) lv_label_set_text_fmt(home_hour_label, "%02d", demo_hour);
-  if (home_min_label) lv_label_set_text_fmt(home_min_label, "%02d", demo_min);
-  if (home_date_label) lv_label_set_text_fmt(home_date_label, "%s, %s %d", WEEKDAY_NAMES[demo_wday % 7], MONTH_NAMES[demo_mon % 12], demo_mday);
+  clock_read_local();
+  if (home_hour_label) lv_label_set_text_fmt(home_hour_label, "%02d", clock_hour);
+  if (home_min_label) lv_label_set_text_fmt(home_min_label, "%02d", clock_min);
+  if (home_date_label) lv_label_set_text_fmt(home_date_label, "%s, %s %d", WEEKDAY_NAMES[clock_wday % 7], MONTH_NAMES[clock_mon % 12], clock_mday);
 }
 
 // The only exit from Settings: turns the setup AP off (if on) and connects
@@ -1821,6 +2114,42 @@ void settings_close_cb(lv_event_t *e)
 }
 
 // Fires after the touch driver's long_press_time (set to 5s in setup()).
+// "v3.6" over "192.168.1.23 - -58 dBm" (or "Wi-Fi not connected").
+void settings_info_update()
+{
+  if (!settings_info_lab) return;
+  char fw[48];
+  switch (gh_state)
+  {
+    case GH_CHECKING: snprintf(fw, sizeof(fw), "v" FW_VERSION " - checking..."); break;
+    case GH_UP_TO_DATE: snprintf(fw, sizeof(fw), "v" FW_VERSION " - up to date"); break;
+    case GH_AVAILABLE: snprintf(fw, sizeof(fw), "v" FW_VERSION " - v%s available", gh_latest); break;
+    case GH_INSTALLING: snprintf(fw, sizeof(fw), "Installing v%s...", gh_latest); break;
+    case GH_FAILED: snprintf(fw, sizeof(fw), "v" FW_VERSION " - %s", gh_error); break;
+    default: snprintf(fw, sizeof(fw), "Firmware v" FW_VERSION); break;
+  }
+  if (wifi_signal_ui_connected)
+    lv_label_set_text_fmt(settings_info_lab, "%s\n%s  \xE2\x80\xA2  %d dBm", fw,
+                          WiFi.localIP().toString().c_str(), (int)wifi_signal_rssi_dbm);
+  else
+    lv_label_set_text_fmt(settings_info_lab, "%s\nWi-Fi not connected", fw);
+
+  if (update_btn_lab)
+  {
+    if (gh_state == GH_AVAILABLE) lv_label_set_text_fmt(update_btn_lab, "Install v%s", gh_latest);
+    else lv_label_set_text(update_btn_lab, "Check update");
+    lv_obj_set_style_bg_color(update_btn, gh_state == GH_AVAILABLE ? COLOR_SUCCESS : COLOR_BG_LIGHT, LV_PART_MAIN);
+  }
+}
+
+// Check first; once a newer release is known the same button installs it.
+void update_btn_clicked_cb(lv_event_t *e)
+{
+  if (gh_state == GH_CHECKING || gh_state == GH_INSTALLING) return;
+  if (gh_state == GH_AVAILABLE) gh_install_request = true;
+  else gh_check_request = true;
+}
+
 void open_settings_cb(lv_event_t *e)
 {
   if (in_settings) return;
@@ -1830,6 +2159,7 @@ void open_settings_cb(lv_event_t *e)
   if (ap_enabled) lv_obj_add_state(ap_switch, LV_STATE_CHECKED);
   else lv_obj_clear_state(ap_switch, LV_STATE_CHECKED);
   update_ap_status_label();
+  settings_info_update();
 
   if (page_dots_row) lv_obj_add_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
   nav_menu_hide();
@@ -2355,6 +2685,14 @@ lv_obj_t *create_settings_screen()
   lv_obj_set_style_text_font(title, &lv_font_montserrat_28, LV_PART_MAIN);
   lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
+  // Firmware version, IP and signal - filled by settings_info_update().
+  settings_info_lab = lv_label_create(scr);
+  lv_label_set_text(settings_info_lab, "v" FW_VERSION);
+  lv_obj_set_style_text_color(settings_info_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
+  lv_obj_set_style_text_font(settings_info_lab, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_style_text_align(settings_info_lab, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+  lv_obj_align(settings_info_lab, LV_ALIGN_TOP_RIGHT, 0, 0);
+
   // ---- Setup Access Point ----
   lv_obj_t *ap_row = lv_obj_create(scr);
   lv_obj_set_size(ap_row, 432, 78);
@@ -2476,7 +2814,7 @@ lv_obj_t *create_settings_screen()
 
   // ---- Restart device (bottom row, left of Close) ----
   lv_obj_t *restart_btn = lv_btn_create(scr);
-  lv_obj_set_size(restart_btn, 212, 48);
+  lv_obj_set_size(restart_btn, 136, 48);
   lv_obj_align(restart_btn, LV_ALIGN_BOTTOM_LEFT, 0, 0);
   lv_obj_set_style_bg_color(restart_btn, lv_color_hex(0xEF5350), LV_PART_MAIN);
   lv_obj_set_style_radius(restart_btn, 12, LV_PART_MAIN);
@@ -2488,8 +2826,19 @@ lv_obj_t *create_settings_screen()
 
   // ---- Close: the AP toggle above already applies live, so this is the
   // only exit - it turns the AP off and connects to the configured Wi-Fi.
+  // ---- Update from GitHub (middle of the bottom row) ----
+  update_btn = lv_btn_create(scr);
+  lv_obj_set_size(update_btn, 144, 48);
+  lv_obj_align(update_btn, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_obj_set_style_bg_color(update_btn, COLOR_BG_LIGHT, LV_PART_MAIN);
+  lv_obj_set_style_radius(update_btn, 12, LV_PART_MAIN);
+  lv_obj_add_event_cb(update_btn, update_btn_clicked_cb, LV_EVENT_CLICKED, NULL);
+  update_btn_lab = lv_label_create(update_btn);
+  lv_label_set_text(update_btn_lab, "Check update");
+  lv_obj_center(update_btn_lab);
+
   lv_obj_t *close_btn = lv_btn_create(scr);
-  lv_obj_set_size(close_btn, 212, 48);
+  lv_obj_set_size(close_btn, 136, 48);
   lv_obj_align(close_btn, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
   lv_obj_set_style_bg_color(close_btn, COLOR_PRIMARY, LV_PART_MAIN);
   lv_obj_set_style_radius(close_btn, 12, LV_PART_MAIN);
@@ -2672,8 +3021,7 @@ void switch_screen(uint8_t num, lv_scr_load_anim_t anim)
 // pinned to the opposite core from loop()/lv_timer_handler(). The one rule
 // this task must never break: no LVGL calls from here, ever - LVGL is not
 // thread-safe. Anything that needs to reach the screen sets a
-// *_needs_ui_refresh flag (or, for the demo clock, updates the plain
-// demo_hour/min/sec vars) and lets loop() apply it.
+// *_needs_ui_refresh flag and lets loop() apply it.
 static uint32_t last_clock_sync_ms = 0;
 #define CLOCK_SYNC_INTERVAL_MS (60UL * 60UL * 1000UL)
 #define CLOCK_RETRY_INTERVAL_MS (15UL * 1000UL)
@@ -2725,6 +3073,7 @@ void network_task(void *param)
       wifi_signal_needs_ui_refresh = true;
     }
     bambu_mqtt_maintain();
+    if (wifi_connected && clock_synced_once) gh_update_maintain();
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
@@ -2756,8 +3105,9 @@ void setup()
   Serial.println("Screen filled black");
 
 #ifdef GFX_BL
-  pinMode(GFX_BL, OUTPUT);
-  digitalWrite(GFX_BL, HIGH);
+  // PWM so it can dim at night - see backlight_update().
+  ledcAttach(GFX_BL, BACKLIGHT_PWM_HZ, 8);
+  backlight_set(settings.day_level);
 #endif
 
   lv_init();
@@ -2824,6 +3174,7 @@ void setup()
     create_next_hotspot();
     create_nav_menu();
     create_wifi_signal_indicator();
+    create_update_ui();
     create_blackout_overlay();
     create_finish_flash_overlay();
     last_activity_ms = millis();
@@ -2844,6 +3195,139 @@ void setup()
   }
 }
 
+// ==================== "Update available" icon + dialog ====================
+// Green download icon on Home (right edge, under the Settings corner) while
+// a newer GitHub release is known and not skipped; a tap asks Install / Skip.
+static lv_obj_t *update_icon = NULL;
+static lv_obj_t *update_dialog = NULL;     // backdrop holding the card
+static lv_obj_t *update_dialog_text = NULL;
+
+bool update_offer_pending()
+{
+  return gh_state == GH_AVAILABLE && settings.update_mode == UPDATE_NOTIFY &&
+         strcmp(gh_latest, settings.update_skip) != 0;
+}
+
+void update_icon_refresh()
+{
+  if (!update_icon) return;
+  bool show = update_offer_pending() && current_screen == 0 && !in_settings;
+  if (show == lv_obj_has_flag(update_icon, LV_OBJ_FLAG_HIDDEN))
+    (show ? lv_obj_clear_flag : lv_obj_add_flag)(update_icon, LV_OBJ_FLAG_HIDDEN);
+  if (update_dialog && !update_offer_pending()) lv_obj_add_flag(update_dialog, LV_OBJ_FLAG_HIDDEN);
+}
+
+void update_icon_clicked_cb(lv_event_t *e)
+{
+  lv_label_set_text_fmt(update_dialog_text, "Firmware v%s is available.\nYou have v" FW_VERSION ".", gh_latest);
+  lv_obj_clear_flag(update_dialog, LV_OBJ_FLAG_HIDDEN);
+}
+
+void update_dialog_cb(lv_event_t *e)
+{
+  int choice = (int)(intptr_t)lv_event_get_user_data(e); // 1 install, 2 skip, 0 just close
+  lv_obj_add_flag(update_dialog, LV_OBJ_FLAG_HIDDEN);
+  if (choice == 1) gh_install_request = true;
+  if (choice == 2)
+  {
+    strlcpy(settings.update_skip, gh_latest, sizeof(settings.update_skip));
+    save_settings();
+  }
+  update_icon_refresh();
+}
+
+static lv_obj_t *update_dialog_btn(lv_obj_t *card, const char *text, lv_color_t color, int choice, lv_align_t align)
+{
+  lv_obj_t *btn = lv_btn_create(card);
+  lv_obj_set_size(btn, 150, 46);
+  lv_obj_align(btn, align, 0, 0);
+  lv_obj_set_style_bg_color(btn, color, LV_PART_MAIN);
+  lv_obj_set_style_radius(btn, 12, LV_PART_MAIN);
+  lv_obj_add_event_cb(btn, update_dialog_cb, LV_EVENT_CLICKED, (void *)(intptr_t)choice);
+  lv_obj_t *lab = lv_label_create(btn);
+  lv_label_set_text(lab, text);
+  lv_obj_center(lab);
+  return btn;
+}
+
+void create_update_ui()
+{
+  lv_obj_t *layer = lv_disp_get_layer_top(NULL);
+
+  update_icon = lv_btn_create(layer);
+  lv_obj_set_size(update_icon, 40, 40);
+  lv_obj_align(update_icon, LV_ALIGN_TOP_RIGHT, -8, 98); // just below the 90x90 Settings corner
+  lv_obj_set_style_radius(update_icon, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(update_icon, COLOR_SUCCESS, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(update_icon, 0, LV_PART_MAIN);
+  lv_obj_add_event_cb(update_icon, update_icon_clicked_cb, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *sym = lv_label_create(update_icon);
+  lv_label_set_text(sym, LV_SYMBOL_DOWNLOAD);
+  lv_obj_set_style_text_color(sym, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_center(sym);
+  lv_obj_add_flag(update_icon, LV_OBJ_FLAG_HIDDEN);
+
+  // Opaque-only styling (no partial opacity on full-screen objects - see blackout_overlay).
+  update_dialog = lv_obj_create(layer);
+  lv_obj_set_size(update_dialog, 480, 480);
+  lv_obj_set_pos(update_dialog, 0, 0);
+  lv_obj_set_style_bg_opa(update_dialog, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(update_dialog, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(update_dialog, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_event_cb(update_dialog, update_dialog_cb, LV_EVENT_CLICKED, (void *)(intptr_t)0);
+  lv_obj_add_flag(update_dialog, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t *card = lv_obj_create(update_dialog);
+  lv_obj_set_size(card, 360, 190);
+  lv_obj_center(card);
+  lv_obj_set_style_bg_color(card, lv_color_hex(0x10181F), LV_PART_MAIN);
+  lv_obj_set_style_border_color(card, COLOR_SUCCESS, LV_PART_MAIN);
+  lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
+  lv_obj_set_style_radius(card, 16, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(card, 18, LV_PART_MAIN);
+  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *title = lv_label_create(card);
+  lv_label_set_text(title, "Update available");
+  lv_obj_set_style_text_color(title, COLOR_SUCCESS, LV_PART_MAIN);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_22, LV_PART_MAIN);
+  lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+  update_dialog_text = lv_label_create(card);
+  lv_label_set_text(update_dialog_text, "");
+  lv_obj_set_style_text_color(update_dialog_text, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_set_style_text_font(update_dialog_text, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_align(update_dialog_text, LV_ALIGN_TOP_LEFT, 0, 36);
+
+  update_dialog_btn(card, "Skip", lv_color_hex(0x34424F), 2, LV_ALIGN_BOTTOM_LEFT);
+  update_dialog_btn(card, "Install", COLOR_SUCCESS, 1, LV_ALIGN_BOTTOM_RIGHT);
+}
+
+// "Updating firmware NN%" card over everything while an upload runs.
+void ota_apply_to_ui()
+{
+  static lv_obj_t *card = NULL;
+  static lv_obj_t *lab = NULL;
+  if (!card)
+  {
+    card = lv_obj_create(lv_disp_get_layer_top(NULL));
+    lv_obj_set_size(card, 320, 110);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x10181F), LV_PART_MAIN);
+    lv_obj_set_style_border_color(card, COLOR_PRIMARY, LV_PART_MAIN);
+    lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(card, 16, LV_PART_MAIN);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lab = lv_label_create(card);
+    lv_obj_set_style_text_color(lab, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_set_style_text_font(lab, &lv_font_montserrat_22, LV_PART_MAIN);
+    lv_obj_set_style_text_align(lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_center(lab);
+  }
+  lv_label_set_text_fmt(lab, "Updating firmware\n%u%%", (unsigned)ota_percent);
+  (ota_in_progress ? lv_obj_clear_flag : lv_obj_add_flag)(card, LV_OBJ_FLAG_HIDDEN);
+}
+
 void loop()
 {
   lv_timer_handler();
@@ -2860,6 +3344,8 @@ void loop()
   if (flight_change_pending) { flight_change_pending = false; flight_alert_start(flight_change_mask); flight_change_mask = 0; }
   if (proxmox_needs_ui_refresh) { proxmox_needs_ui_refresh = false; proxmox_apply_to_ui(); }
   if (wifi_signal_needs_ui_refresh) { wifi_signal_needs_ui_refresh = false; wifi_signal_apply_to_ui(); }
+  if (ota_needs_ui_refresh) { ota_needs_ui_refresh = false; ota_apply_to_ui(); }
+  if (gh_needs_ui_refresh) { gh_needs_ui_refresh = false; settings_info_update(); update_icon_refresh(); }
 
   delay(5);
 }

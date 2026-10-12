@@ -1,6 +1,6 @@
 // ==================== Screen 4: Calendar ====================
 // Split out of ESP32-4848S040.ino. Renders the real current month (via the
-// same NTP sync that drives the Home screen clock - see demo_year/mon/mday
+// same NTP sync that drives the Home screen clock - see clock_year/mon/mday
 // in ESP32-4848S040.ino) and overlays which days have events. Filled dot =
 // event day, ringed dot = today, ringed+filled = today with an event.
 //
@@ -96,23 +96,23 @@ bool calendar_has_feeds()
 // fetch (web_fetch.ino refetches as soon as it notices the month changed).
 bool calendar_data_is_current()
 {
-  return calendar && calendar_have_data && calendar->year == demo_year && calendar->month == demo_mon;
+  return calendar && calendar_have_data && calendar->year == clock_year && calendar->month == clock_mon;
 }
 
-// Refreshes the title/grid/legend from demo_year/demo_mon/demo_mday (set by
+// Refreshes the title/grid/legend from clock_year/clock_mon/clock_mday (set by
 // sync_clock_ntp()) and the fetched calendar data. Called once at screen
 // creation and again whenever calendar_needs_ui_refresh is set (a fresh NTP
 // sync and/or a fresh calendar fetch).
 void calendar_apply_to_ui()
 {
-  int ty = demo_year, tmon = demo_mon + 1; // 1-based month
+  int ty = clock_year, tmon = clock_mon + 1; // 1-based month
   int tdim = cal_days_in_month(ty, tmon);
   int start_col = cal_day_of_week_mon0(ty, tmon, 1);
 
   data_lock();
   bool current = calendar_data_is_current();
 
-  if (cal_title_lab) lv_label_set_text_fmt(cal_title_lab, "%s %d", MONTH_NAMES[demo_mon % 12], ty);
+  if (cal_title_lab) lv_label_set_text_fmt(cal_title_lab, "%s %d", MONTH_NAMES[clock_mon % 12], ty);
 
   for (int i = 0; i < CALENDAR_GRID_CELLS; i++)
   {
@@ -130,7 +130,7 @@ void calendar_apply_to_ui()
       continue;
     }
 
-    bool is_today = (day == demo_mday);
+    bool is_today = (day == clock_mday);
     bool has_event = current && calendar->has_event[day];
 
     if (marker)
@@ -309,7 +309,7 @@ void close_calendar_day_screen(lv_event_t *e)
 
 void open_calendar_day_screen(int day)
 {
-  int ty = demo_year, tmon = demo_mon + 1;
+  int ty = clock_year, tmon = clock_mon + 1;
   if (day < 1 || day > cal_days_in_month(ty, tmon)) return;
 
   data_lock();
@@ -320,7 +320,7 @@ void open_calendar_day_screen(int day)
   }
 
   int wday = cal_day_of_week_sun0(ty, tmon, day); // 0=Sunday, matches WEEKDAY_NAMES
-  if (cal_day_title_lab) lv_label_set_text_fmt(cal_day_title_lab, "%s, %s %d", WEEKDAY_NAMES[wday], MONTH_NAMES[demo_mon % 12], day);
+  if (cal_day_title_lab) lv_label_set_text_fmt(cal_day_title_lab, "%s, %s %d", WEEKDAY_NAMES[wday], MONTH_NAMES[clock_mon % 12], day);
 
   int n = calendar->day_count[day];
   if (n > CALENDAR_MAX_EVENTS_PER_DAY) n = CALENDAR_MAX_EVENTS_PER_DAY;

@@ -17,7 +17,7 @@ A dashboard application for the 480×480 4-inch ESP32-4848S040 display (ESP32-S3
 
 Flights in your calendar (titles like `AC871 YUL->YYZ`, `TS399 PUJ->YUL` or anything containing "flight") are pinned on the Home strip from 24 hours before departure, with a countdown. With an AeroDataBox key the strip also shows delays, gate, "In the air" and "Landed".
 
-Dark theme, color-coded status indicators (green/yellow/red), 60 FPS LVGL rendering.
+Also: dark theme with color-coded status (green/yellow/red), night dimming on a schedule you choose, and firmware updates from GitHub releases straight from the device (or by uploading a file in the browser).
 
 ## Hardware Requirements
 
@@ -103,6 +103,7 @@ If you'd rather stay on LVGL 9.5+, you'll need to update the sketch's display-in
 | Anywhere | swipe left/right to change screen | |
 
 - **Pinned** (a red pin icon top-left): the screen stays put. Swipes, corner taps, the jump menu, automatic returns to Home and automatic screen changes (print start, flight changes) are all paused until you hold the top-left corner again.
+- **Update available** (a green download icon on Home, right edge): tap it to install the new release or skip that version. See [Firmware updates](#firmware-updates).
 - The Wi-Fi icon (top-right) shows only on Home, for 20 seconds after you get there or after the connection changes, and stays while Wi-Fi is down. Turn **Auto-hide Wi-Fi icon** off in Settings to always show it on every screen.
 - The jump menu closes after 10 seconds or on a tap outside it. On the Calendar day view the top-left corner is its back button.
 - With "Always on Home" (setup page), the icons also stay on Home, right of the menu corner.
@@ -120,26 +121,53 @@ Use the corners or swipe left/right to move between them (see [Navigation](#navi
 7. **Packages**: up to 5 PKGE parcels with status and estimated delivery
 8. **Flight**: only while a calendar flight is coming up or in progress
 
+## Settings screen
+
+Hold the top-right corner for 5 seconds. Top right shows the firmware version, update status, IP address and Wi-Fi signal.
+
+| Control | What it does |
+| --- | --- |
+| **Setup Access Point** | Starts the setup Wi-Fi network and web page (see below). |
+| **Show Bambu screen on print start** | Jumps to the Bambu screen when a print starts. |
+| **Show Flight screen on changes** | Shows the Flight screen for 2 minutes when its data changes. |
+| **Auto-hide Wi-Fi icon** | On: the icon shows only on Home, for 20 seconds. Off: always, on every screen. |
+| **Return to Home after** | 1, 2, 5 or 10 minutes without a touch. |
+| **Restart** | Restarts the device. |
+| **Check update / Install vX.Y** | Looks for a newer GitHub release; once one is found, the same button installs it. |
+| **Close** | Turns the setup network off and goes back. |
+
 ## Setup page
 
-Hold the top-right corner for 5 seconds to open Settings, turn on **Setup Access Point**, join `ESP32-Dashboard-Setup` (password `12345678`) and browse to `http://192.168.4.1`. Saving restarts the device.
+In Settings turn on **Setup Access Point**, then join the Wi-Fi network `ESP32-Dashboard-Setup` with the password shown on the screen (random, made once per device) and browse to `http://192.168.4.1`. Saving restarts the device.
 
 | Field | What to enter |
 | --- | --- |
-| **Weather location** | A city, optionally with a 2-letter country code (`London, GB`), or `latitude,longitude`. A city is looked up once with Open-Meteo's geocoding. |
+| **Wi-Fi** | Your network (the list is scanned live) and its password. |
+| **Time zone** | Your zone; summer/winter time is automatic. |
+| **Weather location** | A city, optionally with a 2-letter country code (`London, GB`), or `latitude,longitude`. Empty uses the city of the time zone. A city is looked up once with Open-Meteo's geocoding. |
+| **Home screen: shortcut icons** | Top-left corner menu (default), always on Home as well, or off. See [Navigation](#navigation). |
+| **Display brightness** | Normal brightness, and night dimming: on/off, from/until hour (it may wrap past midnight, e.g. 23 to 7) and night brightness (0 turns the screen off). At night the screen dims after 30 seconds without a touch; a touch brings it back. |
+| **Firmware updates from GitHub** | Show an icon and let me choose (default), install automatically, or don't check. |
+| **Bambu printer** | Printer name (shown on screen), IP address, port (8883), serial number and LAN access code, from the printer's network settings. |
 | **Stocks** | Up to 7 Yahoo Finance symbols, comma separated: `AAPL,NVDA,^IXIC`. |
 | **Calendar** | Up to 3 `.ics` links. Google Calendar: Settings → your calendar → Integrate calendar → *Secret address in iCal format* (treat it like a password). |
 | **MakerWorld user ID** | The number in your profile's `/design-service/published/<number>/design` address. |
 | **PKGE API key** | From business.pkge.net → Company profile → API key. Add tracking numbers in the PKGE dashboard. Empty keeps the saved key, `-` removes it. |
 | **AeroDataBox API key** | Optional. Free key: rapidapi.com → AeroDataBox → Basic plan. Empty keeps the saved key, `-` removes it. |
-| **Home screen: shortcut icons** | Top-left corner menu (default), always on Home as well, or off. See [Navigation](#navigation). |
-| **Bambu printer / Proxmox** | As before. |
+| **Proxmox cluster** | Host as `ip:port` (8006), API token ID (`user@realm!name`) and secret. A read-only PVEAuditor token is enough. |
+| **Firmware update** | Upload a `.ino.bin` file to update from the browser. |
 
-Settings from older firmware are kept; the old latitude/longitude become the weather location. The old "Dashboard Data" (Apps Script) ID is no longer used.
+## Firmware updates
+
+- **From GitHub (on the device):** the device checks the latest release of this repository once a day. Depending on the setup page choice it shows a green icon on Home (tap it, then **Install** or **Skip** this version), installs by itself, or does nothing until you press **Check update** in Settings. Downloads are checked against pinned root certificates, so only files really coming from GitHub are accepted.
+- **From the browser:** on the setup page, pick the `ESP32S3-4848S040-ESP32-4848S040.ino.bin` file from a release (not the `merged` one) and press **Upload firmware**.
+- **By USB:** as in [Installation](#installation), or flash the `merged` file at address 0 with esptool.
+
+The screen shows "Updating firmware" with progress, then restarts. Settings are kept.
 
 ## Continuous integration
 
-`.github/workflows/compile.yml` (run it from the Actions tab) builds the firmware for the ESP32-S3 only, with LVGL 8.4.0 and `ci/lv_conf.h`, reads `FW_VERSION` from `ESP32-4848S040.ino`, and on `main` publishes the binaries as release `firmware-<version>`. Bump `FW_VERSION` before each release; the workflow refuses a version that's already released.
+`.github/workflows/compile.yml` (run it from the Actions tab) builds the firmware for the ESP32-S3 only, with LVGL 8.4.0 and `ci/lv_conf.h`, reads `FW_VERSION` from `ESP32-4848S040.ino`, and on `main` publishes the binaries as release `firmware-<version>` (named "ESP32-S3Dashboard <version>"), which is where the devices update from. Bump `FW_VERSION` before each release; the workflow refuses a version that's already released.
 
 ## Hardware Reference
 
@@ -151,23 +179,9 @@ G Channel: G0-G5 → GPIO 8,20,3,46,9,10
 B Channel: B0-B4 → GPIO 4,5,6,7,15
 Control:   PCLK→21  HSYNC→16  VSYNC→17  DE→18
 SPI/Cfg:   CS→39  SCK→48  SDA/MOSI→47
-Backlight: BL (PWM)→38
+Backlight: BL (PWM, dimmable)→38
+Touch:     GT911 I2C  SDA→19  SCL→45  (no INT/RST)
 ```
-
-### Optional Wiring
-
-```
-Touch (GT911, common pins):
-  SDA → GPIO 17   SCL → GPIO 18   INT → GPIO 8 (optional)
-
-DHT22 sensor:
-  Data → GPIO 9   VCC → 3.3V   GND → GND
-
-BME680 (I2C):
-  SDA → GPIO 15   SCL → GPIO 16   VCC → 3.3V   GND → GND
-```
-
-Available GPIO for other uses: 2, 19, 34, 35, 36, 37, 40, 41, 42, 43, 44, 45 (some restricted).
 
 ## Development
 
@@ -186,16 +200,12 @@ network_task (core 0)                         loop() (core 1, LVGL)
 
 ## Performance
 
-| Metric | Value |
+| Item | Value |
 |--------|-------|
-| Display Resolution | 480×480 |
-| Refresh Rate | ~60 FPS |
-| Draw Buffer | ~200KB |
-| VRAM Used | ~460KB (480×480×2 bytes) |
-| Free Heap Required | ~500KB (LVGL + buffers) |
-| Boot Time | ~2-3 seconds |
-| Screen Switch Time | <100ms |
-| Power Usage | ~1-2W at full brightness |
+| Display | 480×480 RGB565, ST7701S, 10 MHz pixel clock (~35 fps panel refresh) |
+| Frame buffer | PSRAM (480×480×2 bytes) |
+| LVGL draw buffer | 32 lines in internal RAM |
+| Firmware size | ~1.7 MB of the 3 MB app partition (two partitions, for updates) |
 
 ## Color Palette
 
@@ -226,6 +236,7 @@ network_task (core 0)                         loop() (core 1, LVGL)
 - Recheck display init parameters in the main sketch
 
 **Lines flashing, picture rolled up by a few lines, or small dark dashes**
+- Also expected for a moment while a firmware update is being written.
 - The panel streams its picture from PSRAM, which it shares with Wi-Fi and drawing. The firmware runs the panel at 10 MHz, draws in internal RAM (the boot log says `LVGL draw buffer: 32 lines in internal RAM`), writes the drawn rows back from the cache in whole lines, and re-aligns the panel every 2 seconds and on every screen change (`rgb_resync.cpp`), so a rolled picture recovers on its own.
 - Brief flashes can still happen during large downloads (MakerWorld, hourly). Use a solid 5 V / 2 A supply.
 
@@ -246,6 +257,8 @@ ESP32-4848S040/
 ├── bambu.ino / calendar.ino / proxmox.ino / stocks.ino / makerworld.ino / tracking.ino / flight.ino  ← one tab per screen
 ├── web_fetch.ino                ← schedules the direct fetches and copies results into the screens
 ├── direct_fetch.cpp/.h          ← Open-Meteo geocoding, Yahoo, iCal parser, MakerWorld, PKGE, AeroDataBox
+├── gh_update.cpp/.h             ← firmware updates from GitHub releases (pinned root certificates)
+├── lv_font_roboto_*.c           ← clock/temperature digits (made with lv_font_conv)
 ├── rgb_resync.cpp               ← re-aligns the RGB panel after a PSRAM bandwidth hiccup
 ├── home_icons.c                 ← shortcut icons (generated by tools/make_home_icons.py)
 ├── calendar_types.h             ← calendar/flight structs shared by the tabs and direct_fetch.cpp
