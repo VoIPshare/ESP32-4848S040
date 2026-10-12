@@ -2,11 +2,10 @@
 // A colored banner across the top of every screen for things worth noticing
 // right away: a package delivered (tracking.ino), a Proxmox node going
 // offline (proxmox.ino), a failed print (bambu.ino). It blinks a few times,
-// stays for ALERT_SHOW_MS (a tap dismisses it) and lights the screen up -
+// stays for a minute, or as long as a /notify asks (a tap dismisses it) and lights the screen up -
 // except at night (see night_now()), when it waits quietly for a touch.
 // Opaque and only ever shown/hidden, never faded (see blackout_overlay).
 
-#define ALERT_SHOW_MS (60UL * 1000UL)
 #define ALERT_BLINKS 6
 
 static lv_obj_t *alert_banner = NULL;
@@ -42,7 +41,7 @@ void create_alert_banner()
 }
 
 // LVGL thread only (the *_apply_to_ui() functions call it).
-void alert_show(const char *text, lv_color_t color)
+void alert_show(const char *text, lv_color_t color, uint32_t show_ms)
 {
   if (!alert_banner) return;
   Serial.printf("[Alert] %s\n", text);
@@ -50,7 +49,7 @@ void alert_show(const char *text, lv_color_t color)
   lv_obj_set_style_bg_color(alert_banner, color, LV_PART_MAIN);
   lv_obj_clear_flag(alert_banner, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(alert_banner);
-  alert_until_ms = millis() + ALERT_SHOW_MS;
+  alert_until_ms = millis() + show_ms;
   alert_blinks_left = ALERT_BLINKS;
   if (!night_now())
   {

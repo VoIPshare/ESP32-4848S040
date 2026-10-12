@@ -126,7 +126,7 @@ Use the corners or swipe left/right to move between them (see [Navigation](#navi
 2. **Bambu Lab printer**: status, progress, temperatures, layers, AMS trays, fans and HMS warnings
 3. **Calendar**: the current month with event days marked; tap a day for its events
 4. **Proxmox cluster**: up to 3 nodes with status, CPU, RAM, disk and uptime
-5. **Stocks**: up to 7 quotes with daily change
+5. **Stocks**: up to 7 quotes with daily change and a sparkline of today's price (15-minute steps, with a faint line at yesterday's close)
 6. **MakerWorld**: likes, downloads, prints, collections and boosts with today's growth, designs/followers/level, and the 3 most downloaded designs
 7. **Packages**: up to 5 PKGE parcels with status and estimated delivery
 8. **Flight**: only while a calendar flight is coming up or in progress
@@ -149,7 +149,11 @@ Hold the top-right corner for 5 seconds. Top right shows the firmware version an
 
 ## Setup page
 
-In Settings turn on **Setup Access Point**, then join the Wi-Fi network `ESP32-Dashboard-Setup` with the password shown on the screen (random, made once per device) and browse to `http://192.168.4.1`. Saving restarts the device.
+Two ways in:
+- **On your Wi-Fi** (once the display is connected): open `http://dashboard.local` or the IP shown in Settings, and log in as `admin` with the setup password shown in Settings (random, made once per device).
+- **Setup network** (first setup, or a new Wi-Fi): in Settings turn on **Setup Access Point**, join `ESP32-Dashboard-Setup` with that same password, and browse to `http://192.168.4.1` (no login needed there).
+
+Saving restarts the device.
 
 | Field | What to enter |
 | --- | --- |
@@ -170,13 +174,32 @@ In Settings turn on **Setup Access Point**, then join the Wi-Fi network `ESP32-D
 | **Firmware update** | Upload a `.ino.bin` file to update from the browser. |
 | **Backup** | *Download all settings* saves them as a JSON file (with your passwords and keys, so keep it private). Pick that file and press **Restore settings** to load it back, e.g. after a full re-flash or on a second display. |
 
+## Messages from Home Assistant
+
+Anything in Home Assistant can show a message on the alert banner. Add this to `configuration.yaml` (password: the setup password from Settings):
+
+```yaml
+rest_command:
+  dashboard_message:
+    url: http://dashboard.local/notify
+    method: POST
+    username: admin
+    password: !secret dashboard_password
+    content_type: application/json
+    payload: '{"message": "{{ message }}", "color": "{{ color | default(''blue'') }}", "seconds": {{ seconds | default(60) }}}'
+```
+
+Then in an automation: `action: rest_command.dashboard_message` with `data: {message: "Washing machine done", color: green}`. Colors: red, green, orange, blue, purple. It lights up the screen (not at night) and stays until the time is up or you tap it.
+
 ## Firmware updates
 
 - **From GitHub (on the device):** the device checks the latest release of this repository once a day. Depending on the setup page choice it shows a green icon on Home (tap it, then **Install** or **Skip** this version), installs by itself, or does nothing until you press **Check update** in Settings. Downloads are checked against pinned root certificates, so only files really coming from GitHub are accepted.
 - **From the browser:** on the setup page, pick the `ESP32S3-4848S040-ESP32-4848S040.ino.bin` file from a release (not the `merged` one) and press **Upload firmware**.
 - **By USB:** as in [Installation](#installation), or flash the `merged` file at address 0 with esptool.
 
-The screen shows "Updating firmware" with progress, then restarts. Settings are kept.
+The screen goes black with an "Updating firmware" progress card, then restarts. Settings are kept.
+
+A watchdog restarts the display by itself if it ever freezes. Unplanned restarts (crash, watchdog, power dip) are counted and shown on the Settings screen.
 
 ## Continuous integration
 

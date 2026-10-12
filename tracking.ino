@@ -127,7 +127,7 @@ void tracking_check_delivered()
       char msg[64];
       snprintf(msg, sizeof(msg), LV_SYMBOL_OK "  Package delivered: ...%s",
                len > 8 ? tracking[i].track_number + len - 8 : tracking[i].track_number);
-      alert_show(msg, lv_color_hex(0x2E7D32));
+      alert_show(msg, lv_color_hex(0x2E7D32), 60000UL);
     }
   }
   for (int i = 0; i < tracking_count; i++)

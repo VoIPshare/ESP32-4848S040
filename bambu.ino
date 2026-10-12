@@ -382,7 +382,7 @@ void bambu_apply_to_ui()
                            strcmp(bambu_prev_gcode_state, "PREPARE") == 0 ||
                            strcmp(bambu_prev_gcode_state, "PAUSE") == 0;
   if (strcmp(bambu.gcode_state, "FAILED") == 0 && was_printing_ish)
-    alert_show(LV_SYMBOL_WARNING "  Print failed", lv_color_hex(0xC62828));
+    alert_show(LV_SYMBOL_WARNING "  Print failed", lv_color_hex(0xC62828), 60000UL);
   if (strcmp(bambu.gcode_state, "FINISH") == 0 && was_printing_ish)
   {
     bambu_finish_badge_until_ms = millis() + BAMBU_FINISH_BADGE_MS;

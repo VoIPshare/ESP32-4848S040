@@ -256,7 +256,7 @@ void update_home_proxmox_badge()
         if (proxmox.nodes[i].valid && strcmp(proxmox.nodes[i].status, "online") != 0) { name = proxmox.nodes[i].name; break; }
       char msg[64];
       snprintf(msg, sizeof(msg), LV_SYMBOL_WARNING "  Proxmox: %s offline", name);
-      alert_show(msg, lv_color_hex(0xC62828));
+      alert_show(msg, lv_color_hex(0xC62828), 60000UL);
     }
     prev_offline = offline;
   }

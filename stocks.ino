@@ -22,12 +22,56 @@ struct StockQuote
   float price = 0;
   float change_pct = 0;
   bool valid = false;
+  float prev_close = 0;
+  int spark_n = 0;
+  float spark[STOCK_SPARK_MAX];
 };
 static StockQuote stocks[STOCK_COUNT];
 static lv_obj_t *stock_row[STOCK_COUNT] = {NULL};
 static lv_obj_t *stock_symbol_lab[STOCK_COUNT] = {NULL};
 static lv_obj_t *stock_price_lab[STOCK_COUNT] = {NULL};
 static lv_obj_t *stock_change_lab[STOCK_COUNT] = {NULL};
+// Intraday sparkline per row, and a faint line at yesterday's close.
+#define SPARK_X 88   // row content coordinates: right of the symbol, left of the price
+#define SPARK_W 120
+#define SPARK_H 30
+static lv_obj_t *stock_spark[STOCK_COUNT] = {NULL};
+static lv_obj_t *stock_base[STOCK_COUNT] = {NULL};
+static lv_point_t stock_spark_pts[STOCK_COUNT][STOCK_SPARK_MAX];
+static lv_point_t stock_base_pts[STOCK_COUNT][2];
+
+static void stock_draw_spark(int i)
+{
+  const StockQuote &q = stocks[i];
+  if (q.spark_n < 2)
+  {
+    lv_obj_add_flag(stock_spark[i], LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(stock_base[i], LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  // Scale to the day's range, including yesterday's close so the baseline fits.
+  float lo = q.prev_close > 0 ? q.prev_close : q.spark[0], hi = lo;
+  for (int k = 0; k < q.spark_n; k++) { lo = min(lo, q.spark[k]); hi = max(hi, q.spark[k]); }
+  float span = hi - lo > 0.0001f ? hi - lo : 1;
+  // A full US session is 26 points: a partial day only fills part of the width.
+  int slots = max(q.spark_n, 26);
+  for (int k = 0; k < q.spark_n; k++)
+  {
+    stock_spark_pts[i][k].x = SPARK_X + (lv_coord_t)(k * SPARK_W / (slots - 1));
+    stock_spark_pts[i][k].y = 1 + (lv_coord_t)(SPARK_H - (q.spark[k] - lo) / span * SPARK_H);
+  }
+  lv_line_set_points(stock_spark[i], stock_spark_pts[i], q.spark_n);
+  lv_obj_set_style_line_color(stock_spark[i], q.change_pct >= 0 ? COLOR_SUCCESS : lv_color_hex(0xEF5350), LV_PART_MAIN);
+  lv_obj_clear_flag(stock_spark[i], LV_OBJ_FLAG_HIDDEN);
+  if (q.prev_close > 0)
+  {
+    lv_coord_t y = 1 + (lv_coord_t)(SPARK_H - (q.prev_close - lo) / span * SPARK_H);
+    stock_base_pts[i][0] = {SPARK_X, y};
+    stock_base_pts[i][1] = {SPARK_X + SPARK_W, y};
+    lv_line_set_points(stock_base[i], stock_base_pts[i], 2);
+    lv_obj_clear_flag(stock_base[i], LV_OBJ_FLAG_HIDDEN);
+  }
+}
 
 static const lv_coord_t STOCK_ROW_H = 46;
 static const lv_coord_t STOCK_ROW_GAP = 6;
@@ -68,6 +112,7 @@ void stocks_apply_to_ui()
       lv_label_set_text_fmt(stock_change_lab[i], "%+.2f%%", stocks[i].change_pct);
       lv_obj_set_style_text_color(stock_change_lab[i], stocks[i].change_pct >= 0 ? COLOR_SUCCESS : lv_color_hex(0xEF5350), LV_PART_MAIN);
     }
+    if (stock_spark[i]) stock_draw_spark(i);
   }
 }
 
@@ -115,6 +160,24 @@ lv_obj_t *create_stocks_screen()
     lv_obj_set_style_text_font(price, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_obj_align(price, LV_ALIGN_RIGHT_MID, -90, 0);
     stock_price_lab[i] = price;
+
+    // Line objects with a fixed size, vertically centered in the row; their
+    // points are in row content coordinates (see SPARK_X).
+    lv_obj_t *base = lv_line_create(row);
+    lv_obj_set_size(base, SPARK_X + SPARK_W + 2, SPARK_H + 2);
+    lv_obj_align(base, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_line_color(base, lv_color_hex(0x3A4652), LV_PART_MAIN);
+    lv_obj_set_style_line_width(base, 1, LV_PART_MAIN);
+    lv_obj_add_flag(base, LV_OBJ_FLAG_HIDDEN);
+    stock_base[i] = base;
+
+    lv_obj_t *spark = lv_line_create(row);
+    lv_obj_set_size(spark, SPARK_X + SPARK_W + 2, SPARK_H + 2);
+    lv_obj_align(spark, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_line_width(spark, 2, LV_PART_MAIN);
+    lv_obj_set_style_line_rounded(spark, true, LV_PART_MAIN);
+    lv_obj_add_flag(spark, LV_OBJ_FLAG_HIDDEN);
+    stock_spark[i] = spark;
   }
 
   return scr;

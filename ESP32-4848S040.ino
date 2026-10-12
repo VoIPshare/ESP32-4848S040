@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.8"
+#define FW_VERSION "3.9"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -26,6 +26,8 @@
 #include <Update.h>
 #include "bootloader_random.h"
 #include "nvs.h"
+#include "esp_task_wdt.h"
+#include <ESPmDNS.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <esp32s3/rom/cache.h> // Cache_WriteBack_Addr() - see my_disp_flush()
@@ -196,6 +198,9 @@ static bool in_settings = false;
 // Detail pages outside screens[] (Calendar day, Forecast, Agenda) - see
 // open_subscreen(). current_screen keeps the page they were opened from.
 static bool in_subscreen = false;
+// Why the board last restarted, when it wasn't planned (see restart_reason_init()).
+static const char *restart_reason = "";
+static uint16_t crash_count = 0;
 
 // Auto-return-to-Home after N min idle (see clock_tick_cb()) - N is
 // settings.idle_return_home_min, set on the on-device Settings screen (see
@@ -513,7 +518,9 @@ void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color
 }
 
 // ==================== Backlight / night dimming ====================
-#define BACKLIGHT_PWM_HZ 5000
+// 1 kHz: this board's backlight driver goes black on a 5 kHz PWM (tested
+// 2026-10-12: 1 kHz and 200 Hz dim fine, 5 kHz is off at anything below 100%).
+#define BACKLIGHT_PWM_HZ 1000
 #define NIGHT_DIM_IDLE_MS (30UL * 1000UL)
 #define SAVER_MIN_LEVEL 15 // %: the night clock's floor - lower, this panel is practically black
 static uint8_t backlight_level = 100; // %, as last written
@@ -539,6 +546,14 @@ bool night_now()
 void backlight_update()
 {
   bool dim = night_now() && millis() - last_activity_ms > NIGHT_DIM_IDLE_MS;
+  static bool was_dim = false;
+  if (dim != was_dim)
+  {
+    was_dim = dim;
+    Serial.printf("[Night] %s (hour %d, night %d-%d, level %d%%, idle %lu s)\n", dim ? "dimmed" : "awake", clock_hour,
+                  settings.night_start, settings.night_end, dim ? settings.night_level : settings.day_level,
+                  (unsigned long)((millis() - last_activity_ms) / 1000));
+  }
   uint8_t want = dim ? settings.night_level : settings.day_level;
   screensaver_update();
   if (screensaver_visible() && want < SAVER_MIN_LEVEL) want = SAVER_MIN_LEVEL;
@@ -1718,11 +1733,13 @@ String build_settings_page()
 
 void handle_root()
 {
+  if (!web_auth()) return;
   config_server.send(200, "text/html", build_settings_page());
 }
 
 void handle_scan()
 {
+  if (!web_auth()) return;
   int n = WiFi.scanNetworks();
   String json = "[";
   for (int i = 0; i < n; i++)
@@ -1737,6 +1754,7 @@ void handle_scan()
 
 void handle_save_post()
 {
+  if (!web_auth()) return;
   if (config_server.hasArg("tz")) config_server.arg("tz").toCharArray(settings.tz_name, sizeof(settings.tz_name));
   if (config_server.hasArg("wloc"))
   {
@@ -1848,10 +1866,14 @@ static char gh_latest[16] = "";
 static char gh_error[48] = "";
 static uint32_t last_gh_check_ms = 0;
 #define GH_CHECK_INTERVAL_MS (24UL * 60UL * 60UL * 1000UL)
+#define GH_RETRY_INTERVAL_MS (15UL * 60UL * 1000UL)
+#define GH_FIRST_CHECK_MS (3UL * 60UL * 1000UL)
+#define GH_MIN_BLOCK 24000 // largest free internal block a TLS handshake needs (~17 KB record buffer + margin)
 
 void gh_progress(int done, int total)
 {
-  uint8_t pct = total > 0 ? (uint8_t)(done * 100LL / total) : 0;
+  esp_task_wdt_reset();
+  uint8_t pct = total > 0 ? (uint8_t)(done * 100LL / total) / 5 * 5 : 0; // redraw every 5% only
   if (pct != ota_percent) { ota_percent = pct; ota_needs_ui_refresh = true; }
 }
 
@@ -1859,8 +1881,12 @@ void gh_progress(int done, int total)
 void gh_update_maintain()
 {
   if (gh_install_request && gh_state != GH_AVAILABLE) gh_install_request = false; // stale tap
-  bool due = settings.update_mode != UPDATE_OFF &&
-             (last_gh_check_ms == 0 || millis() - last_gh_check_ms > GH_CHECK_INTERVAL_MS);
+  // Scheduled checks: not in the first minutes after boot (every widget
+  // fetches then, and internal RAM is tight), once a day, sooner again
+  // after a failure.
+  uint32_t interval = gh_state == GH_FAILED ? GH_RETRY_INTERVAL_MS : GH_CHECK_INTERVAL_MS;
+  bool due = settings.update_mode != UPDATE_OFF && millis() > GH_FIRST_CHECK_MS &&
+             (last_gh_check_ms == 0 || millis() - last_gh_check_ms > interval);
   if (gh_install_request && gh_state == GH_AVAILABLE)
   {
     gh_install_request = false;
@@ -1878,6 +1904,20 @@ void gh_update_maintain()
   }
   if (!gh_check_request && !due) return;
   bool manual = gh_check_request;
+  if (ESP.getMaxAllocHeap() < GH_MIN_BLOCK)
+  {
+    // Not enough contiguous RAM for TLS right now: try again in a bit.
+    Serial.printf("[Update] check postponed: largest free block %u\n", (unsigned)ESP.getMaxAllocHeap());
+    if (!manual) last_gh_check_ms = millis() - GH_CHECK_INTERVAL_MS + GH_RETRY_INTERVAL_MS;
+    if (manual)
+    {
+      gh_check_request = false;
+      snprintf(gh_error, sizeof(gh_error), "Low memory, try again");
+      gh_state = GH_FAILED;
+      gh_needs_ui_refresh = true;
+    }
+    return;
+  }
   gh_check_request = false;
   last_gh_check_ms = millis();
   gh_state = GH_CHECKING;
@@ -1902,6 +1942,7 @@ void gh_update_maintain()
 
 void handle_update_upload()
 {
+  if (!web_auth_quiet()) return;
   HTTPUpload &up = config_server.upload();
   if (up.status == UPLOAD_FILE_START)
   {
@@ -1913,10 +1954,11 @@ void handle_update_upload()
   }
   else if (up.status == UPLOAD_FILE_WRITE)
   {
+    esp_task_wdt_reset();
     if (Update.isRunning() && Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
     // Content-Length covers the whole multipart body - close enough for a progress bar.
     size_t total = config_server.clientContentLength();
-    uint8_t pct = total ? (uint8_t)min<size_t>(99, Update.progress() * 100 / total) : 0;
+    uint8_t pct = total ? (uint8_t)min<size_t>(99, Update.progress() * 100 / total) / 5 * 5 : 0; // every 5%
     if (pct != ota_percent) { ota_percent = pct; ota_needs_ui_refresh = true; }
   }
   else if (up.status == UPLOAD_FILE_END)
@@ -1933,6 +1975,7 @@ void handle_update_upload()
 
 void handle_update_done()
 {
+  if (!web_auth()) return;
   bool ok = !Update.hasError() && Update.isFinished();
   config_server.send(200, "text/html",
                      ok ? "<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding-top:60px'>"
@@ -1956,6 +1999,7 @@ void handle_update_done()
 // touching this. The AP password stays per device and isn't included.
 void handle_backup()
 {
+  if (!web_auth()) return;
   JsonDocument doc;
   doc["firmware"] = FW_VERSION;
   JsonObject out = doc["settings"].to<JsonObject>();
@@ -2006,6 +2050,7 @@ static String restore_body;
 
 void handle_restore_upload()
 {
+  if (!web_auth_quiet()) return;
   HTTPUpload &up = config_server.upload();
   if (up.status == UPLOAD_FILE_START) restore_body = "";
   else if (up.status == UPLOAD_FILE_WRITE && restore_body.length() < 32768) restore_body.concat((const char *)up.buf, up.currentSize);
@@ -2013,6 +2058,7 @@ void handle_restore_upload()
 
 void handle_restore_done()
 {
+  if (!web_auth()) return;
   JsonDocument doc;
   bool ok = !deserializeJson(doc, restore_body) && doc["settings"].is<JsonObject>();
   restore_body = "";
@@ -2054,30 +2100,100 @@ void handle_restore_done()
   }
 }
 
+// The setup page runs on both networks: the setup AP (open to whoever has
+// its Wi-Fi password, plus the captive-portal tricks below) and, once the
+// board is on your Wi-Fi, http://dashboard.local or its IP - there behind
+// a login (user "admin", the setup password shown in Settings). Routes are
+// registered once, the first time either network comes up.
+static bool web_started = false;
+static bool ap_enabled = false;
+
 void start_config_server()
 {
+  if (web_started) return;
+  web_started = true;
   config_server.on("/", handle_root);
   config_server.on("/backup", HTTP_GET, handle_backup);
   config_server.on("/restore", HTTP_POST, handle_restore_done, handle_restore_upload);
   config_server.on("/update", HTTP_POST, handle_update_done, handle_update_upload);
   config_server.on("/scan", handle_scan);
   config_server.on("/save", HTTP_POST, handle_save_post);
+  config_server.on("/notify", HTTP_POST, handle_notify);
   // Catch-all: iOS/Android/Windows each probe a different well-known URL
   // (e.g. captive.apple.com/hotspot-detect.html, connectivitycheck.gstatic.com)
   // right after joining a Wi-Fi network. Serving our page for *any* unmatched
-  // path - combined with the DNS server below redirecting every hostname to
-  // us - makes those probes fail "as expected" for a captive portal, which is
-  // exactly what makes the OS auto-open a browser to this page.
+  // path - combined with the DNS server redirecting every hostname to us
+  // (set_ap_enabled()) - makes those probes fail "as expected" for a captive
+  // portal, which is exactly what makes the OS auto-open a browser to this page.
   config_server.onNotFound(handle_root);
+  const char *keys[] = {"Authorization"};
+  config_server.collectHeaders(keys, 1);
   config_server.begin();
+}
 
-  // Redirect all DNS queries from AP clients to our own IP, regardless of
-  // hostname - the other half of the captive-portal trick above.
-  dns_server.start(53, "*", WiFi.softAPIP());
+// ==================== Messages from Home Assistant ====================
+// POST /notify {"message": "Washing machine done", "color": "green",
+// "seconds": 60} shows it on the alert banner (alerts.ino). Same login as
+// the setup page - see the README for the rest_command to put in HA.
+static char notify_text[96];
+static uint32_t notify_color = 0;
+static uint16_t notify_seconds = 60;
+static volatile bool notify_pending = false;
+
+void handle_notify()
+{
+  if (!web_auth()) return;
+  JsonDocument doc;
+  if (deserializeJson(doc, config_server.arg("plain")) || !doc["message"].is<const char *>())
+  {
+    config_server.send(400, "application/json", "{\"error\":\"send JSON with a \\\"message\\\"\"}");
+    return;
+  }
+  static const struct { const char *name; uint32_t rgb; } COLORS[] = {
+      {"red", 0xC62828}, {"green", 0x2E7D32}, {"orange", 0xE65100}, {"blue", 0x1565C0}, {"purple", 0x6A1B9A}};
+  const char *c = doc["color"] | "blue";
+  uint32_t rgb = 0x1565C0;
+  for (auto &k : COLORS)
+    if (!strcasecmp(c, k.name)) rgb = k.rgb;
+  data_lock();
+  strlcpy(notify_text, doc["message"] | "", sizeof(notify_text));
+  notify_color = rgb;
+  notify_seconds = constrain(doc["seconds"] | 60, 5, 3600);
+  data_unlock();
+  notify_pending = true;
+  config_server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// loop() side.
+void notify_apply_to_ui()
+{
+  char text[sizeof(notify_text)];
+  data_lock();
+  strlcpy(text, notify_text, sizeof(text));
+  uint32_t rgb = notify_color;
+  uint16_t secs = notify_seconds;
+  data_unlock();
+  alert_show(text, lv_color_hex(rgb), secs * 1000UL);
+}
+
+// True when the request may go ahead: always from the setup AP, otherwise
+// with the login. Asks the browser for it when missing.
+bool web_auth()
+{
+  if (config_server.client().localIP() == WiFi.softAPIP() && ap_enabled) return true;
+  if (config_server.authenticate("admin", ap_password)) return true;
+  config_server.requestAuthentication(BASIC_AUTH, "Dashboard setup");
+  return false;
+}
+
+// Same check for upload callbacks (no response possible from there).
+bool web_auth_quiet()
+{
+  return (config_server.client().localIP() == WiFi.softAPIP() && ap_enabled) ||
+         config_server.authenticate("admin", ap_password);
 }
 
 // ==================== Settings (long-press top-right corner) ====================
-static bool ap_enabled = false;
 static uint8_t screen_before_settings = 0;
 static lv_obj_t *settings_screen;
 static lv_obj_t *cal_day_screen; // Calendar day-detail screen - see calendar.ino
@@ -2110,6 +2226,10 @@ void update_ap_status_label()
   if (ap_enabled)
   {
     lv_label_set_text_fmt(ap_status_lab, "On - %s / %s (%s)", AP_SSID, ap_password, AP_IP_STR);
+  }
+  else if (wifi_signal_ui_connected)
+  {
+    lv_label_set_text_fmt(ap_status_lab, "Off - or open http://%s  (admin / %s)", WiFi.localIP().toString().c_str(), ap_password);
   }
   else
   {
@@ -2159,17 +2279,18 @@ void set_ap_enabled(bool on)
     // the default AP IP is already 192.168.4.1. Matches the known-working
     // pattern from the earlier e-paper project; the extra config calls were
     // one more thing that could go wrong for no benefit.
-    if (!ap_password[0]) ap_password_init();
     bool ok = WiFi.softAP(AP_SSID, ap_password);
     start_config_server();
+    // Redirect all DNS queries from AP clients to our own IP, regardless of
+    // hostname - the other half of the captive-portal trick (start_config_server()).
+    dns_server.start(53, "*", WiFi.softAPIP());
     Serial.printf("AP %s - SSID: %s  IP: %s  free heap: %u\n",
                    ok ? "started" : "FAILED TO START",
                    AP_SSID, WiFi.softAPIP().toString().c_str(), ESP.getFreeHeap());
   }
   else
   {
-    config_server.stop();
-    dns_server.stop();
+    dns_server.stop(); // the setup page itself stays up on your Wi-Fi
     WiFi.softAPdisconnect(true);
     Serial.println("AP stopped");
   }
@@ -2372,12 +2493,17 @@ void settings_info_update()
   else snprintf(upt, sizeof(upt), "%luh %lum", (unsigned long)(up / 60), (unsigned long)(up % 60));
   unsigned ram_kb = ESP.getFreeHeap() / 1024;
   float psram_mb = ESP.getFreePsram() / 1048576.0f;
+  // Third line only after unplanned restarts (crash, watchdog, power dip).
+  char diag[64] = "";
+  if (crash_count)
+    snprintf(diag, sizeof(diag), "\n%u unplanned restart%s%s%s", crash_count, crash_count == 1 ? "" : "s",
+             restart_reason[0] ? ", this one after a " : "", restart_reason);
   if (wifi_signal_ui_connected)
-    lv_label_set_text_fmt(settings_info_lab, "%s  \xE2\x80\xA2  up %s\n%s  \xE2\x80\xA2  %d dBm  \xE2\x80\xA2  free %uK + %.1fM",
-                          fw, upt, WiFi.localIP().toString().c_str(), (int)wifi_signal_rssi_dbm, ram_kb, psram_mb);
+    lv_label_set_text_fmt(settings_info_lab, "%s  \xE2\x80\xA2  up %s\n%s  \xE2\x80\xA2  %d dBm  \xE2\x80\xA2  free %uK + %.1fM%s",
+                          fw, upt, WiFi.localIP().toString().c_str(), (int)wifi_signal_rssi_dbm, ram_kb, psram_mb, diag);
   else
-    lv_label_set_text_fmt(settings_info_lab, "%s  \xE2\x80\xA2  up %s\nWi-Fi not connected  \xE2\x80\xA2  free %uK + %.1fM",
-                          fw, upt, ram_kb, psram_mb);
+    lv_label_set_text_fmt(settings_info_lab, "%s  \xE2\x80\xA2  up %s\nWi-Fi not connected  \xE2\x80\xA2  free %uK + %.1fM%s",
+                          fw, upt, ram_kb, psram_mb, diag);
 
   if (update_btn_lab)
   {
@@ -2962,8 +3088,8 @@ lv_obj_t *create_settings_screen()
 
   // ---- Setup Access Point ----
   lv_obj_t *ap_row = lv_obj_create(scr);
-  lv_obj_set_size(ap_row, 432, 78);
-  lv_obj_align(ap_row, LV_ALIGN_TOP_LEFT, 0, 44);
+  lv_obj_set_size(ap_row, 432, 74);
+  lv_obj_align(ap_row, LV_ALIGN_TOP_LEFT, 0, 50); // room for the 3-line info top right
   lv_obj_set_style_bg_color(ap_row, COLOR_BG_LIGHT, LV_PART_MAIN);
   lv_obj_set_style_border_width(ap_row, 0, LV_PART_MAIN);
   lv_obj_set_style_radius(ap_row, 16, LV_PART_MAIN);
@@ -3329,18 +3455,62 @@ static uint32_t last_clock_sync_ms = 0;
 #define CLOCK_SYNC_INTERVAL_MS (60UL * 60UL * 1000UL)
 #define CLOCK_RETRY_INTERVAL_MS (15UL * 1000UL)
 
+// ==================== Watchdog / restart reason ====================
+// Both tasks feed the task watchdog; if either hangs for WDT_TIMEOUT_S the
+// board restarts by itself. Restarts that weren't asked for (crash,
+// watchdog, power dip) are counted and shown on the Settings screen.
+#define WDT_TIMEOUT_S 90 // generous: some fetches block for several seconds
+
+
+void restart_reason_init()
+{
+  esp_reset_reason_t r = esp_reset_reason();
+  switch (r)
+  {
+    case ESP_RST_PANIC: restart_reason = "crash"; break;
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT: restart_reason = "watchdog"; break;
+    case ESP_RST_BROWNOUT: restart_reason = "power dip"; break;
+    default: restart_reason = ""; break; // power on, restart, update
+  }
+  Preferences p;
+  p.begin("diag", false);
+  crash_count = p.getUShort("crashes", 0);
+  if (restart_reason[0]) p.putUShort("crashes", ++crash_count);
+  p.end();
+  Serial.printf("Reset reason %d%s%s, unplanned restarts so far: %u\n", (int)r, restart_reason[0] ? " - " : "",
+                restart_reason, crash_count);
+}
+
+void watchdog_start()
+{
+  esp_task_wdt_config_t cfg = {};
+  cfg.timeout_ms = WDT_TIMEOUT_S * 1000;
+  cfg.idle_core_mask = 0;
+  cfg.trigger_panic = true;
+  if (esp_task_wdt_reconfigure(&cfg) != ESP_OK) esp_task_wdt_init(&cfg);
+  esp_task_wdt_add(NULL); // the calling task: loop() (setup() runs in it)
+}
+
 void network_task(void *param)
 {
+  esp_task_wdt_add(NULL);
   for (;;)
   {
-    if (ap_enabled)
-    {
-      config_server.handleClient();
-      dns_server.processNextRequest();
-    }
+    esp_task_wdt_reset();
+    if (web_started) config_server.handleClient();
+    if (ap_enabled) dns_server.processNextRequest();
     if (wifi_got_ip)
     {
       wifi_got_ip = false;
+      start_config_server();
+      static bool mdns_started = false;
+      if (!mdns_started && MDNS.begin("dashboard")) // http://dashboard.local
+      {
+        MDNS.addService("http", "tcp", 80);
+        mdns_started = true;
+      }
       last_clock_sync_ms = millis();
       sync_clock_ntp();
       // Diagnostic: every WiFiClientSecure handshake below needs a sizeable
@@ -3387,10 +3557,12 @@ void setup()
   Serial.begin(115200);
   delay(500);
   Serial.println("\n\n=== Dashboard starting (firmware " FW_VERSION ") ===");
+  restart_reason_init();
 
   data_mutex = xSemaphoreCreateRecursiveMutex();
 
   load_settings();
+  ap_password_init(); // also the setup page login - see web_auth()
 
   WiFi.onEvent(on_wifi_event);
   connect_saved_wifi();
@@ -3410,7 +3582,8 @@ void setup()
 
 #ifdef GFX_BL
   // PWM so it can dim at night - see backlight_update().
-  ledcAttach(GFX_BL, BACKLIGHT_PWM_HZ, 8);
+  bool bl_ok = ledcAttach(GFX_BL, BACKLIGHT_PWM_HZ, 8);
+  Serial.printf("[Backlight] PWM on GPIO %d: %s\n", GFX_BL, bl_ok ? "ok" : "FAILED");
   backlight_set(settings.day_level);
 #endif
 
@@ -3498,6 +3671,7 @@ void setup()
     // network_task() above for why and the thread-safety rules it follows.
     // 12 KB stack: the iCal/MakerWorld/PKGE parsers keep their buffers on
     // the heap, but the TLS client + JSON filters still need some headroom.
+    watchdog_start(); // before the network task, which adds itself
     xTaskCreatePinnedToCore(network_task, "network", 12288, NULL, 1, NULL, 0);
 
     Serial.println("Setup done");
@@ -3634,11 +3808,22 @@ void ota_apply_to_ui()
     lv_obj_center(lab);
   }
   lv_label_set_text_fmt(lab, "Updating firmware\n%u%%", (unsigned)ota_percent);
+  // While flash is being written the panel can't always read its picture
+  // from PSRAM and smears shifted copies of it - so everything goes black
+  // (nothing to smear) except this small card.
+  if (blackout_overlay) (ota_in_progress ? lv_obj_clear_flag : lv_obj_add_flag)(blackout_overlay, LV_OBJ_FLAG_HIDDEN);
   (ota_in_progress ? lv_obj_clear_flag : lv_obj_add_flag)(card, LV_OBJ_FLAG_HIDDEN);
+  if (ota_in_progress)
+  {
+    if (blackout_overlay) lv_obj_move_foreground(blackout_overlay);
+    lv_obj_move_foreground(card);
+  }
+  else rgb_panel_resync(rgbpanel);
 }
 
 void loop()
 {
+  esp_task_wdt_reset();
   lv_timer_handler();
 
   // Anything network_task flagged as ready gets applied to LVGL here, on
@@ -3655,6 +3840,7 @@ void loop()
   if (wifi_signal_needs_ui_refresh) { wifi_signal_needs_ui_refresh = false; wifi_signal_apply_to_ui(); }
   if (ota_needs_ui_refresh) { ota_needs_ui_refresh = false; ota_apply_to_ui(); }
   if (ha_take_ui_refresh()) ha_apply_to_ui();
+  if (notify_pending) { notify_pending = false; notify_apply_to_ui(); }
   if (gh_needs_ui_refresh) { gh_needs_ui_refresh = false; settings_info_update(); update_icon_refresh(); }
 
   delay(5);

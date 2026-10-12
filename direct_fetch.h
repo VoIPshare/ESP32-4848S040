@@ -18,11 +18,15 @@
 #define ICS_URL_MAX 257
 #define TRACKING_MAX 5
 
+#define STOCK_SPARK_MAX 32 // intraday closes, every 15 min (a US session has 26)
+
 struct DfQuote
 {
   char symbol[12];
   float price;
   float prev_close;
+  int spark_n;
+  float spark[STOCK_SPARK_MAX];
 };
 
 #define MW_TOP_DESIGNS 3

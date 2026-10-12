@@ -65,6 +65,9 @@ void fetch_stocks()
       s.price = quotes[i].price;
       s.change_pct = quotes[i].prev_close != 0 ? (quotes[i].price - quotes[i].prev_close) / quotes[i].prev_close * 100.0f : 0.0f;
       s.valid = quotes[i].price > 0;
+      s.prev_close = quotes[i].prev_close;
+      s.spark_n = quotes[i].spark_n;
+      memcpy(s.spark, quotes[i].spark, sizeof(s.spark));
     }
     else
     {

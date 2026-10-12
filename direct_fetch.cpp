@@ -254,6 +254,7 @@ bool df_fetch_stocks(const char *symbols, DfQuote *out, int max, int *count, int
     meta["regularMarketPrice"] = true;
     meta["chartPreviousClose"] = true;
     meta["previousClose"] = true;
+    filter["chart"]["result"][0]["indicators"]["quote"][0]["close"] = true;
 
     char list[96];
     snprintf(list, sizeof(list), "%s", symbols);
@@ -265,7 +266,7 @@ bool df_fetch_stocks(const char *symbols, DfQuote *out, int max, int *count, int
       url_encode(sym, encoded, sizeof(encoded));
 
       char url[160];
-      snprintf(url, sizeof(url), "https://query1.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=1d", encoded);
+      snprintf(url, sizeof(url), "https://query1.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=15m", encoded);
 
       JsonDocument doc;
       if (!http_get_json(url, doc, &filter)) { failures++; continue; }
@@ -283,6 +284,10 @@ bool df_fetch_stocks(const char *symbols, DfQuote *out, int max, int *count, int
       snprintf(q.symbol, sizeof(q.symbol), "%s", sym[0] == '^' ? sym + 1 : sym);
       q.price = m["regularMarketPrice"] | 0.0f;
       q.prev_close = m["chartPreviousClose"] | (m["previousClose"] | 0.0f);
+      // Today's 15-minute closes for the sparkline (gaps come as null).
+      q.spark_n = 0;
+      for (JsonVariant c : doc["chart"]["result"][0]["indicators"]["quote"][0]["close"].as<JsonArray>())
+        if (!c.isNull() && q.spark_n < STOCK_SPARK_MAX) q.spark[q.spark_n++] = c.as<float>();
       Serial.printf("[Stocks] %s %.2f (prev %.2f)\n", q.symbol, q.price, q.prev_close);
     }
   }
