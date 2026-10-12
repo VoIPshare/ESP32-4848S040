@@ -175,19 +175,19 @@ static void mw_make_counter(lv_obj_t *parent, const char *caption, lv_color_t co
   lv_obj_t *val = lv_label_create(chip);
   lv_label_set_text(val, "--");
   lv_obj_set_style_text_color(val, color, LV_PART_MAIN);
-  lv_obj_set_style_text_font(val, &lv_font_montserrat_26, LV_PART_MAIN);
+  lv_obj_set_style_text_font(val, &lv_font_ui_26, LV_PART_MAIN);
   makerworld_val[idx] = val;
 
   lv_obj_t *lab = lv_label_create(chip);
   lv_label_set_text(lab, caption);
   lv_obj_set_style_text_color(lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(lab, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_style_text_font(lab, &lv_font_ui_12, LV_PART_MAIN);
   lv_obj_set_style_text_letter_space(lab, 1, LV_PART_MAIN);
 
   lv_obj_t *delta = lv_label_create(chip);
   lv_label_set_text(delta, "");
   lv_obj_set_style_text_color(delta, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(delta, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_style_text_font(delta, &lv_font_ui_12, LV_PART_MAIN);
   makerworld_delta[idx] = delta;
 }
 
@@ -215,19 +215,19 @@ lv_obj_t *create_makerworld_screen()
   lv_obj_t *title = lv_label_create(scr);
   lv_label_set_text(title, "MakerWorld");
   lv_obj_set_style_text_color(title, COLOR_PRIMARY, LV_PART_MAIN);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_28, LV_PART_MAIN);
+  lv_obj_set_style_text_font(title, &lv_font_ui_28, LV_PART_MAIN);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 16);
 
   makerworld_profile_lab = lv_label_create(scr);
   lv_label_set_text(makerworld_profile_lab, "");
   lv_obj_set_style_text_color(makerworld_profile_lab, lv_color_hex(0xB0BEC5), LV_PART_MAIN);
-  lv_obj_set_style_text_font(makerworld_profile_lab, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(makerworld_profile_lab, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_align(makerworld_profile_lab, LV_ALIGN_TOP_MID, 0, 54);
 
   makerworld_status_lab = lv_label_create(scr);
   lv_label_set_text(makerworld_status_lab, "");
   lv_obj_set_style_text_color(makerworld_status_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(makerworld_status_lab, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_style_text_font(makerworld_status_lab, &lv_font_ui_12, LV_PART_MAIN);
   lv_obj_set_width(makerworld_status_lab, 420);
   lv_obj_set_style_text_align(makerworld_status_lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_align(makerworld_status_lab, LV_ALIGN_TOP_MID, 0, 74);
@@ -246,7 +246,7 @@ lv_obj_t *create_makerworld_screen()
   lv_obj_t *top_hdr = lv_label_create(scr);
   lv_label_set_text(top_hdr, "TOP DESIGNS");
   lv_obj_set_style_text_color(top_hdr, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(top_hdr, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_style_text_font(top_hdr, &lv_font_ui_12, LV_PART_MAIN);
   lv_obj_set_style_text_letter_space(top_hdr, 1, LV_PART_MAIN);
   lv_obj_set_pos(top_hdr, 24, 304);
 
@@ -267,13 +267,13 @@ lv_obj_t *create_makerworld_screen()
     lv_obj_t *rank = lv_label_create(row);
     lv_label_set_text_fmt(rank, "%d", i + 1);
     lv_obj_set_style_text_color(rank, lv_color_hex(rank_colors[i]), LV_PART_MAIN);
-    lv_obj_set_style_text_font(rank, &lv_font_montserrat_18, LV_PART_MAIN);
+    lv_obj_set_style_text_font(rank, &lv_font_ui_18, LV_PART_MAIN);
     lv_obj_align(rank, LV_ALIGN_LEFT_MID, 14, 0);
 
     lv_obj_t *name = lv_label_create(row);
     lv_label_set_text(name, "");
     lv_obj_set_style_text_color(name, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(name, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(name, &lv_font_ui_14, LV_PART_MAIN);
     lv_obj_set_width(name, 300);
     lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
     lv_obj_align(name, LV_ALIGN_LEFT_MID, 40, 0);
@@ -282,7 +282,7 @@ lv_obj_t *create_makerworld_screen()
     lv_obj_t *count = lv_label_create(row);
     lv_label_set_text(count, "");
     lv_obj_set_style_text_color(count, COLOR_PRIMARY, LV_PART_MAIN);
-    lv_obj_set_style_text_font(count, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(count, &lv_font_ui_14, LV_PART_MAIN);
     lv_obj_align(count, LV_ALIGN_RIGHT_MID, -14, 0);
     makerworld_top_count[i] = count;
   }

@@ -30,16 +30,16 @@ const char *tracking_status_label(int status)
 {
   switch (status)
   {
-    case -1: case 0: case 1: return "Checking";
-    case 2: return "No info yet";
-    case 3: return "In transit";
-    case 4: return "At pickup point";
-    case 5: return "Delivered";
-    case 6: return "Not delivered";
-    case 7: return "Delivery error";
-    case 8: return "Preparing";
-    case 9: return "Route ended";
-    default: return "Unknown";
+    case -1: case 0: case 1: return tr(S_TRK_CHECKING);
+    case 2: return tr(S_TRK_NO_INFO);
+    case 3: return tr(S_TRK_TRANSIT);
+    case 4: return tr(S_TRK_PICKUP);
+    case 5: return tr(S_TRK_DELIVERED);
+    case 6: return tr(S_TRK_NOT_DELIVERED);
+    case 7: return tr(S_TRK_ERROR);
+    case 8: return tr(S_TRK_PREPARING);
+    case 9: return tr(S_TRK_ENDED);
+    default: return tr(S_UNKNOWN);
   }
 }
 
@@ -65,7 +65,7 @@ void tracking_apply_to_ui()
     else if (!tracking_fetch_ok && tracking_count == 0)
       lv_label_set_text(tracking_status_lab, "Fetch failed - check the API key and connection");
     else if (tracking_count == 0)
-      lv_label_set_text(tracking_status_lab, "No packages being tracked");
+      lv_label_set_text(tracking_status_lab, tr(S_NO_PACKAGES));
     else
       lv_label_set_text(tracking_status_lab, "");
   }
@@ -90,13 +90,17 @@ void tracking_apply_to_ui()
     {
       struct tm et;
       localtime_r(&t.est_delivery, &et);
-      strftime(eta, sizeof(eta), "ETA %a %b %d", &et);
+      char dm[24];
+      format_day_month(dm, sizeof(dm), et.tm_mon, et.tm_mday);
+      snprintf(eta, sizeof(eta), "%s %.3s %s", tr(S_ETA), WEEKDAY_NAMES[et.tm_wday % 7], dm);
     }
     else if (t.last_date > 0)
     {
       struct tm lt;
       localtime_r(&t.last_date, &lt);
-      strftime(eta, sizeof(eta), "Updated %b %d, %H:%M", &lt);
+      char dm[24];
+      format_day_month(dm, sizeof(dm), lt.tm_mon, lt.tm_mday);
+      snprintf(eta, sizeof(eta), "%s %s, %02d:%02d", tr(S_UPDATED), dm, lt.tm_hour, lt.tm_min);
     }
     lv_label_set_text(tracking_eta_lab[i], eta);
 
@@ -125,7 +129,7 @@ void tracking_check_delivered()
       if (strcmp(prev_num[j], tracking[i].track_number) != 0 || prev_status[j] == 5) continue;
       size_t len = strlen(tracking[i].track_number);
       char msg[64];
-      snprintf(msg, sizeof(msg), LV_SYMBOL_OK "  Package delivered: ...%s",
+      snprintf(msg, sizeof(msg), LV_SYMBOL_OK "  %s: ...%s", tr(S_DELIVERED),
                len > 8 ? tracking[i].track_number + len - 8 : tracking[i].track_number);
       alert_show(msg, lv_color_hex(0x2E7D32), 60000UL);
     }
@@ -148,13 +152,13 @@ lv_obj_t *create_tracking_screen()
   lv_obj_t *title = lv_label_create(scr);
   lv_label_set_text(title, "Packages");
   lv_obj_set_style_text_color(title, COLOR_PRIMARY, LV_PART_MAIN);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_28, LV_PART_MAIN);
+  lv_obj_set_style_text_font(title, &lv_font_ui_28, LV_PART_MAIN);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
 
   tracking_status_lab = lv_label_create(scr);
   lv_label_set_text(tracking_status_lab, "");
   lv_obj_set_style_text_color(tracking_status_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(tracking_status_lab, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(tracking_status_lab, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_set_width(tracking_status_lab, 420);
   lv_obj_set_style_text_align(tracking_status_lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_align(tracking_status_lab, LV_ALIGN_TOP_MID, 0, 200);
@@ -175,14 +179,14 @@ lv_obj_t *create_tracking_screen()
     lv_obj_t *num = lv_label_create(row);
     lv_label_set_text(num, "");
     lv_obj_set_style_text_color(num, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(num, &lv_font_montserrat_18, LV_PART_MAIN);
+    lv_obj_set_style_text_font(num, &lv_font_ui_18, LV_PART_MAIN);
     lv_obj_align(num, LV_ALIGN_TOP_LEFT, 16, 9);
     tracking_number_lab[i] = num;
 
     lv_obj_t *eta = lv_label_create(row);
     lv_label_set_text(eta, "");
     lv_obj_set_style_text_color(eta, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_text_font(eta, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(eta, &lv_font_ui_12, LV_PART_MAIN);
     lv_obj_align(eta, LV_ALIGN_BOTTOM_LEFT, 16, -9);
     tracking_eta_lab[i] = eta;
 

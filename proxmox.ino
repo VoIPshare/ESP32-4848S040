@@ -255,7 +255,7 @@ void update_home_proxmox_badge()
       for (int i = 0; i < PROXMOX_MAX_NODES; i++)
         if (proxmox.nodes[i].valid && strcmp(proxmox.nodes[i].status, "online") != 0) { name = proxmox.nodes[i].name; break; }
       char msg[64];
-      snprintf(msg, sizeof(msg), LV_SYMBOL_WARNING "  Proxmox: %s offline", name);
+      snprintf(msg, sizeof(msg), LV_SYMBOL_WARNING "  Proxmox: %s %s", name, tr(S_OFFLINE));
       alert_show(msg, lv_color_hex(0xC62828), 60000UL);
     }
     prev_offline = offline;
@@ -281,7 +281,7 @@ void update_home_proxmox_badge()
     }
     else
     {
-      lv_label_set_text_fmt(home_proxmox_badge_lab, "%d NODES OFFLINE", offline);
+      lv_label_set_text_fmt(home_proxmox_badge_lab, tr(S_NODES_OFFLINE), offline);
     }
   }
   lv_obj_clear_flag(home_proxmox_badge, LV_OBJ_FLAG_HIDDEN);
@@ -350,13 +350,13 @@ lv_obj_t *create_proxmox_screen()
   lv_obj_t *title = lv_label_create(scr);
   lv_label_set_text(title, "Proxmox Cluster");
   lv_obj_set_style_text_color(title, COLOR_PRIMARY, LV_PART_MAIN);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_28, LV_PART_MAIN);
+  lv_obj_set_style_text_font(title, &lv_font_ui_28, LV_PART_MAIN);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
 
   lv_obj_t *status = lv_label_create(scr);
   lv_label_set_text(status, "No Proxmox API configured - set it on the Wi-Fi setup page");
   lv_obj_set_style_text_color(status, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(status, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(status, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_set_width(status, 440);
   lv_obj_set_style_text_align(status, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_align(status, LV_ALIGN_TOP_MID, 0, 56);
@@ -390,7 +390,7 @@ lv_obj_t *create_proxmox_screen()
     lv_obj_t *name = lv_label_create(card);
     lv_label_set_text(name, "pve-node");
     lv_obj_set_style_text_color(name, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(name, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_style_text_font(name, &lv_font_ui_16, LV_PART_MAIN);
     lv_obj_align(name, LV_ALIGN_TOP_LEFT, 0, 0);
     proxmox_node_name_lab[i] = name;
 
@@ -403,7 +403,7 @@ lv_obj_t *create_proxmox_screen()
     lv_obj_t *cpu_lab = lv_label_create(card);
     lv_label_set_text(cpu_lab, "CPU --%");
     lv_obj_set_style_text_color(cpu_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_text_font(cpu_lab, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(cpu_lab, &lv_font_ui_12, LV_PART_MAIN);
     lv_obj_set_pos(cpu_lab, 0, 26);
     proxmox_cpu_lab[i] = cpu_lab;
 
@@ -421,7 +421,7 @@ lv_obj_t *create_proxmox_screen()
     lv_obj_t *mem_lab = lv_label_create(card);
     lv_label_set_text(mem_lab, "RAM --%");
     lv_obj_set_style_text_color(mem_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_text_font(mem_lab, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(mem_lab, &lv_font_ui_12, LV_PART_MAIN);
     lv_obj_set_pos(mem_lab, card_w - 24 - bar_w, 26);
     proxmox_mem_lab[i] = mem_lab;
 
@@ -439,7 +439,7 @@ lv_obj_t *create_proxmox_screen()
     lv_obj_t *info = lv_label_create(card);
     lv_label_set_text(info, "Up --  .  Disk --%");
     lv_obj_set_style_text_color(info, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_text_font(info, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(info, &lv_font_ui_12, LV_PART_MAIN);
     lv_obj_set_pos(info, 0, 60);
     proxmox_info_lab[i] = info;
   }

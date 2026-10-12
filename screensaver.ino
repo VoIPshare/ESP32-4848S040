@@ -32,7 +32,7 @@ void create_screensaver()
 
   saver_date = lv_label_create(saver);
   lv_label_set_text(saver_date, "");
-  lv_obj_set_style_text_font(saver_date, &lv_font_montserrat_22, LV_PART_MAIN);
+  lv_obj_set_style_text_font(saver_date, &lv_font_ui_22, LV_PART_MAIN);
   lv_obj_set_style_text_color(saver_date, lv_color_hex(0xB0BEC5), LV_PART_MAIN);
 }
 
@@ -45,7 +45,9 @@ static void screensaver_draw()
 {
   saver_shown_min = clock_min;
   lv_label_set_text_fmt(saver_time, "%02d:%02d", clock_hour, clock_min);
-  lv_label_set_text_fmt(saver_date, "%s, %s %d", WEEKDAY_NAMES[clock_wday % 7], MONTH_NAMES[clock_mon % 12], clock_mday);
+  char d[48];
+  format_long_date(d, sizeof(d), clock_wday, clock_mon, clock_mday);
+  lv_label_set_text(saver_date, d);
   // A small, different offset each minute.
   lv_coord_t dx = (lv_coord_t)((clock_min * 37) % 61) - 30;
   lv_coord_t dy = (lv_coord_t)((clock_min * 53) % 81) - 40;
@@ -57,8 +59,8 @@ static void screensaver_draw()
 void screensaver_update()
 {
   if (!saver) return;
-  bool want = settings.night_clock && settings.night_level > 0 && night_now() &&
-              millis() - last_activity_ms > NIGHT_DIM_IDLE_MS && !ota_in_progress;
+  bool want = settings.night_clock && settings.night_level > 0 && !ota_in_progress &&
+              (dim_forced || (night_now() && millis() - last_activity_ms > NIGHT_DIM_IDLE_MS));
   if (want && !screensaver_visible())
   {
     screensaver_draw();

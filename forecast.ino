@@ -89,7 +89,7 @@ void forecast_apply_to_ui()
     }
     lv_obj_clear_flag(fc_day_row[r], LV_OBJ_FLAG_HIDDEN);
     auto &d = weather_data.daily[i];
-    lv_label_set_text(fc_day_name[r], r == 0 ? "Tomorrow" : WEEKDAY_NAMES[d.wday % 7]);
+    lv_label_set_text(fc_day_name[r], r == 0 ? tr(S_TOMORROW) : WEEKDAY_NAMES[d.wday % 7]);
     lv_img_set_src(fc_day_icon[r], wx_icon_for(d.wcode, true));
     lv_obj_set_style_img_recolor(fc_day_icon[r], wx_icon_color(d.wcode), LV_PART_MAIN);
     if (d.pop >= 10) lv_label_set_text_fmt(fc_day_pop[r], "%d%%", d.pop);
@@ -122,13 +122,13 @@ lv_obj_t *create_forecast_screen()
   make_back_button(scr);
 
   lv_obj_t *title = lv_label_create(scr);
-  lv_label_set_text(title, "Forecast");
+  lv_label_set_text(title, tr(S_FORECAST));
   lv_obj_set_style_text_color(title, COLOR_PRIMARY, LV_PART_MAIN);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_28, LV_PART_MAIN);
+  lv_obj_set_style_text_font(title, &lv_font_ui_28, LV_PART_MAIN);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 22);
 
-  fc_empty_lab = fc_label(scr, &lv_font_montserrat_16, COLOR_TEXT_MUTED);
-  lv_label_set_text(fc_empty_lab, "No forecast yet");
+  fc_empty_lab = fc_label(scr, &lv_font_ui_16, COLOR_TEXT_MUTED);
+  lv_label_set_text(fc_empty_lab, tr(S_NO_FORECAST));
   lv_obj_align(fc_empty_lab, LV_ALIGN_CENTER, 0, 0);
 
   // Next hours: one card, 6 columns.
@@ -144,13 +144,13 @@ lv_obj_t *create_forecast_screen()
   for (int c = 0; c < 6; c++)
   {
     lv_coord_t cx = 8 + c * 72 + 36; // column center
-    fc_hour_time[c] = fc_label(hours, &lv_font_montserrat_14, COLOR_TEXT_MUTED);
+    fc_hour_time[c] = fc_label(hours, &lv_font_ui_14, COLOR_TEXT_MUTED);
     lv_obj_align(fc_hour_time[c], LV_ALIGN_TOP_MID, cx - 224, 10);
     fc_hour_icon[c] = fc_icon(hours);
     lv_obj_align(fc_hour_icon[c], LV_ALIGN_TOP_MID, cx - 224, 34);
-    fc_hour_temp[c] = fc_label(hours, &lv_font_montserrat_20, lv_color_hex(0xFFFFFF));
+    fc_hour_temp[c] = fc_label(hours, &lv_font_ui_20, lv_color_hex(0xFFFFFF));
     lv_obj_align(fc_hour_temp[c], LV_ALIGN_TOP_MID, cx - 224, 70);
-    fc_hour_pop[c] = fc_label(hours, &lv_font_montserrat_12, COLOR_PRIMARY);
+    fc_hour_pop[c] = fc_label(hours, &lv_font_ui_12, COLOR_PRIMARY);
     lv_obj_align(fc_hour_pop[c], LV_ALIGN_TOP_MID, cx - 224, 100);
   }
 
@@ -169,13 +169,13 @@ lv_obj_t *create_forecast_screen()
     lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
     fc_day_row[r] = row;
 
-    fc_day_name[r] = fc_label(row, &lv_font_montserrat_16, lv_color_hex(0xFFFFFF));
+    fc_day_name[r] = fc_label(row, &lv_font_ui_16, lv_color_hex(0xFFFFFF));
     lv_obj_align(fc_day_name[r], LV_ALIGN_LEFT_MID, 16, 0);
     fc_day_icon[r] = fc_icon(row);
     lv_obj_align(fc_day_icon[r], LV_ALIGN_LEFT_MID, 150, 0);
-    fc_day_pop[r] = fc_label(row, &lv_font_montserrat_14, COLOR_PRIMARY);
+    fc_day_pop[r] = fc_label(row, &lv_font_ui_14, COLOR_PRIMARY);
     lv_obj_align(fc_day_pop[r], LV_ALIGN_LEFT_MID, 196, 0);
-    fc_day_temps[r] = fc_label(row, &lv_font_montserrat_18, lv_color_hex(0xFFFFFF));
+    fc_day_temps[r] = fc_label(row, &lv_font_ui_18, lv_color_hex(0xFFFFFF));
     lv_obj_align(fc_day_temps[r], LV_ALIGN_RIGHT_MID, -16, 0);
   }
 

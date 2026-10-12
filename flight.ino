@@ -326,20 +326,20 @@ lv_obj_t *create_flight_screen()
   flight_number_lab = lv_label_create(scr);
   lv_label_set_text(flight_number_lab, "");
   lv_obj_set_style_text_color(flight_number_lab, COLOR_PRIMARY, LV_PART_MAIN);
-  lv_obj_set_style_text_font(flight_number_lab, &lv_font_montserrat_28, LV_PART_MAIN);
+  lv_obj_set_style_text_font(flight_number_lab, &lv_font_ui_28, LV_PART_MAIN);
   lv_obj_align(flight_number_lab, LV_ALIGN_TOP_MID, 0, 20);
 
   flight_route_lab = lv_label_create(scr);
   lv_label_set_text(flight_route_lab, "");
   lv_obj_set_style_text_color(flight_route_lab, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(flight_route_lab, &lv_font_montserrat_28, LV_PART_MAIN);
+  lv_obj_set_style_text_font(flight_route_lab, &lv_font_ui_28, LV_PART_MAIN);
   lv_obj_set_style_text_letter_space(flight_route_lab, 2, LV_PART_MAIN);
   lv_obj_align(flight_route_lab, LV_ALIGN_TOP_MID, 0, 62);
 
   flight_date_lab = lv_label_create(scr);
   lv_label_set_text(flight_date_lab, "");
   lv_obj_set_style_text_color(flight_date_lab, lv_color_hex(0xB0BEC5), LV_PART_MAIN);
-  lv_obj_set_style_text_font(flight_date_lab, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_font(flight_date_lab, &lv_font_ui_16, LV_PART_MAIN);
   lv_obj_align(flight_date_lab, LV_ALIGN_TOP_MID, 0, 104);
 
   flight_pill = make_pill(scr, "", COLOR_TEXT_MUTED, lv_color_hex(0x10181F), &flight_pill_lab);
@@ -348,7 +348,7 @@ lv_obj_t *create_flight_screen()
   flight_countdown_lab = lv_label_create(scr);
   lv_label_set_text(flight_countdown_lab, "");
   lv_obj_set_style_text_color(flight_countdown_lab, COLOR_SECONDARY, LV_PART_MAIN);
-  lv_obj_set_style_text_font(flight_countdown_lab, &lv_font_montserrat_28, LV_PART_MAIN);
+  lv_obj_set_style_text_font(flight_countdown_lab, &lv_font_ui_28, LV_PART_MAIN);
   lv_obj_align(flight_countdown_lab, LV_ALIGN_TOP_MID, 0, 180);
 
   // Departs / Arrives / Gate / Terminal - same chip row as the Home weather stats.
@@ -371,7 +371,7 @@ lv_obj_t *create_flight_screen()
   flight_dep_sched_lab = lv_label_create(scr);
   lv_label_set_text(flight_dep_sched_lab, "");
   lv_obj_set_style_text_color(flight_dep_sched_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(flight_dep_sched_lab, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_style_text_font(flight_dep_sched_lab, &lv_font_ui_12, LV_PART_MAIN);
   lv_obj_set_width(flight_dep_sched_lab, 104);
   lv_obj_set_style_text_align(flight_dep_sched_lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_align(flight_dep_sched_lab, LV_ALIGN_TOP_LEFT, 20, 318);
@@ -379,7 +379,7 @@ lv_obj_t *create_flight_screen()
   flight_dest_lab = lv_label_create(scr);
   lv_label_set_text(flight_dest_lab, "");
   lv_obj_set_style_text_color(flight_dest_lab, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(flight_dest_lab, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_font(flight_dest_lab, &lv_font_ui_16, LV_PART_MAIN);
   lv_obj_set_width(flight_dest_lab, 420);
   lv_obj_set_style_text_align(flight_dest_lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_long_mode(flight_dest_lab, LV_LABEL_LONG_DOT);
@@ -393,7 +393,7 @@ lv_obj_t *create_flight_screen()
   lv_obj_set_style_radius(flight_change_lab, 10, LV_PART_MAIN);
   lv_obj_set_style_pad_hor(flight_change_lab, 12, LV_PART_MAIN);
   lv_obj_set_style_pad_ver(flight_change_lab, 4, LV_PART_MAIN);
-  lv_obj_set_style_text_font(flight_change_lab, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(flight_change_lab, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_set_style_max_width(flight_change_lab, 440, LV_PART_MAIN);
   lv_label_set_long_mode(flight_change_lab, LV_LABEL_LONG_DOT);
   lv_obj_align(flight_change_lab, LV_ALIGN_TOP_MID, 0, 360);
@@ -402,7 +402,7 @@ lv_obj_t *create_flight_screen()
   flight_title_lab = lv_label_create(scr);
   lv_label_set_text(flight_title_lab, "");
   lv_obj_set_style_text_color(flight_title_lab, lv_color_hex(0xE8EDF2), LV_PART_MAIN);
-  lv_obj_set_style_text_font(flight_title_lab, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(flight_title_lab, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_set_width(flight_title_lab, 420);
   lv_obj_set_style_text_align(flight_title_lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_long_mode(flight_title_lab, LV_LABEL_LONG_DOT);
@@ -411,7 +411,7 @@ lv_obj_t *create_flight_screen()
   flight_source_lab = lv_label_create(scr);
   lv_label_set_text(flight_source_lab, "");
   lv_obj_set_style_text_color(flight_source_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(flight_source_lab, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_style_text_font(flight_source_lab, &lv_font_ui_12, LV_PART_MAIN);
   lv_obj_set_width(flight_source_lab, 420);
   lv_obj_set_style_text_align(flight_source_lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_long_mode(flight_source_lab, LV_LABEL_LONG_WRAP);

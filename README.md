@@ -109,12 +109,14 @@ If you'd rather stay on LVGL 9.5+, you'll need to update the sketch's display-in
 | Top-left corner | jump menu: one icon per screen, including Home | 3 s: pin / unpin the current screen |
 | Top-right corner | | 5 s: Settings |
 | Anywhere | swipe left/right to change screen | |
+| Top edge (middle) | swipe down: **quick panel** with brightness, pin, "Dim now", Settings and Wi-Fi info | |
 
 - **Pinned** (a red pin icon top-left): the screen stays put. Swipes, corner taps, the jump menu, automatic returns to Home and automatic screen changes (print start, flight changes) are all paused until you hold the top-left corner again.
 - **Update available** (a green download icon on Home, right edge): tap it to install the new release or skip that version. See [Firmware updates](#firmware-updates).
 - The Wi-Fi icon (top-right) shows only on Home, for 20 seconds after you get there or after the connection changes, and stays while Wi-Fi is down. Turn **Auto-hide Wi-Fi icon** off in Settings to always show it on every screen.
 - On Home, tap the weather for the **Forecast** and the "Next" card for the **Agenda**. Detail pages (these two and the Calendar day view) have a back button top-left, and the top-left corner works as back too.
-- The jump menu closes after 10 seconds or on a tap outside it.
+- The jump menu (two rows of icons) closes after 10 seconds or on a tap outside it.
+- **Dim now** in the quick panel dims the screen (or shows the night clock) right away, day or night, until the next touch.
 - At night (if dimming is on) the first touch only wakes the screen.
 - With "Always on Home" (setup page), the icons also stay on Home, right of the menu corner.
 
@@ -123,7 +125,7 @@ If you'd rather stay on LVGL 9.5+, you'll need to update the sketch's display-in
 Use the corners or swipe left/right to move between them (see [Navigation](#navigation)):
 
 1. **Home**: clock, date, current weather (icon, temperature, humidity, wind, UV) and the next calendar event or flight; a print in progress shows its percentage and time left. Tap the weather for the Forecast, the "Next" card for the Agenda
-2. **Bambu Lab printer**: status, progress, temperatures, layers, AMS trays, fans and HMS warnings
+2. **Bambu Lab printer**: status, progress, temperatures, layers, AMS trays and humidity (orange from 40%, red from 50%), fans and HMS warnings. Tap the printer name for the **print history**: the last 6 prints, finished or failed, with date and duration
 3. **Calendar**: the current month with event days marked; tap a day for its events
 4. **Proxmox cluster**: up to 3 nodes with status, CPU, RAM, disk and uptime
 5. **Stocks**: up to 7 quotes with daily change and a sparkline of today's price (15-minute steps, with a faint line at yesterday's close)
@@ -160,6 +162,7 @@ Saving restarts the device.
 | **Wi-Fi** | Your network (the list is scanned live) and its password. |
 | **Time zone** | Your zone; summer/winter time is automatic. |
 | **Weather location** | A city, optionally with a 2-letter country code (`London, GB`), or `latitude,longitude`. Empty uses the city of the time zone. A city is looked up once with Open-Meteo's geocoding. |
+| **Language** | English, Italiano or Français: dates, weather, Home, Calendar, Agenda, Forecast, Packages, alerts and the quick panel. The technical screens (Bambu, Proxmox, Stocks, MakerWorld, Settings) stay in English. |
 | **Home screen: shortcut icons** | Top-left corner menu (default), always on Home as well, or off. See [Navigation](#navigation). |
 | **Display brightness** | Normal brightness, and night dimming: on/off, from/until hour (it may wrap past midnight, e.g. 23 to 7), the big night clock on/off, and night brightness (0 turns the screen off). At night the screen dims after 30 seconds without a touch; a touch brings it back. |
 | **Firmware updates from GitHub** | Show an icon and let me choose (default), install automatically, or don't check. |
@@ -197,7 +200,7 @@ Then in an automation: `action: rest_command.dashboard_message` with `data: {mes
 - **From the browser:** on the setup page, pick the `ESP32S3-4848S040-ESP32-4848S040.ino.bin` file from a release (not the `merged` one) and press **Upload firmware**.
 - **By USB:** as in [Installation](#installation), or flash the `merged` file at address 0 with esptool.
 
-The screen goes black with an "Updating firmware" progress card, then restarts. Settings are kept.
+The screen shows "Updating firmware" for a moment, then goes dark until the display restarts with the new version (about a minute). Writing the flash makes this panel flicker whatever it shows, so the backlight stays off meanwhile. Settings are kept.
 
 A watchdog restarts the display by itself if it ever freezes. Unplanned restarts (crash, watchdog, power dip) are counted and shown on the Settings screen.
 
@@ -224,6 +227,16 @@ Touch:     GT911 I2C  SDA→19  SCL→45  (no INT/RST)
 - Each screen lives in its own tab (`bambu.ino`, `calendar.ino`, ...) with a `create_*_screen()` builder and a `*_apply_to_ui()` refresh. To add one, add it to `screens[]` in `setup()` and bump `SCREEN_COUNT`.
 - Network work runs on `network_task` (core 0) and must never call LVGL: write the data under `data_lock()`, set a `*_needs_ui_refresh` flag, and let `loop()` apply it.
 - Set `DEBUG` at the top of `ESP32-4848S040.ino` to 0 to silence verbose Serial output.
+
+## Fonts
+
+The UI uses `lv_font_ui_<size>.c` instead of LVGL's built-in Montserrat, so accented letters (Italian, French, accented calendar or design titles) show. They're made from the same files as the built-in ones (`scripts/built_in_font` in the LVGL library), for sizes 12-28:
+
+```bash
+npx lv_font_conv --no-compress --no-prefilter --bpp 4 --size 16 --font Montserrat-Medium.ttf -r 0x20-0x7F,0xA0-0xFF,0x2013-0x2014,0x2018-0x2019,0x201C-0x201D,0x2022,0x2026 --font FontAwesome5-Solid+Brands+Regular.woff -r <the symbol list in built_in_font_gen.py> --format lvgl --lv-font-name lv_font_ui_16 -o lv_font_ui_16.c --force-fast-kern-format
+```
+
+Then change its include to plain `#include "lvgl.h"`.
 
 ## Data flow
 
@@ -297,6 +310,9 @@ ESP32-4848S040/
 ├── direct_fetch.cpp/.h          ← Open-Meteo geocoding, Yahoo, iCal parser, MakerWorld, PKGE, AeroDataBox
 ├── gh_update.cpp/.h             ← firmware updates from GitHub releases (pinned root certificates)
 ├── lv_font_roboto_*.c           ← clock/temperature digits (made with lv_font_conv)
+├── lv_font_ui_*.c               ← UI text: LVGL's Montserrat + symbols, plus Latin-1 accents (see below)
+├── lang.h                       ← English / Italian / French strings
+├── quickpanel.ino / printhistory.ino ← quick panel, Bambu print history
 ├── rgb_resync.cpp               ← re-aligns the RGB panel after a PSRAM bandwidth hiccup
 ├── home_icons.c                 ← shortcut icons (generated by tools/make_home_icons.py)
 ├── calendar_types.h             ← calendar/flight structs shared by the tabs and direct_fetch.cpp

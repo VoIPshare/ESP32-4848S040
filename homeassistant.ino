@@ -201,13 +201,13 @@ lv_obj_t *create_ha_screen()
   lv_obj_t *title = lv_label_create(scr);
   lv_label_set_text(title, "Home");
   lv_obj_set_style_text_color(title, COLOR_PRIMARY, LV_PART_MAIN);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_28, LV_PART_MAIN);
+  lv_obj_set_style_text_font(title, &lv_font_ui_28, LV_PART_MAIN);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
 
   ha_status_lab = lv_label_create(scr);
   lv_label_set_text(ha_status_lab, "");
   lv_obj_set_style_text_color(ha_status_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(ha_status_lab, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(ha_status_lab, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_set_width(ha_status_lab, 400);
   lv_obj_set_style_text_align(ha_status_lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_align(ha_status_lab, LV_ALIGN_CENTER, 0, 0);
@@ -234,14 +234,14 @@ lv_obj_t *create_ha_screen()
     lv_obj_set_width(ha_tile_name[i], 188);
     lv_label_set_long_mode(ha_tile_name[i], LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(ha_tile_name[i], COLOR_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_text_font(ha_tile_name[i], &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ha_tile_name[i], &lv_font_ui_14, LV_PART_MAIN);
     lv_obj_align(ha_tile_name[i], LV_ALIGN_TOP_LEFT, 0, 0);
 
     ha_tile_state[i] = lv_label_create(tile);
     lv_label_set_text(ha_tile_state[i], "");
     lv_obj_set_width(ha_tile_state[i], 188);
     lv_label_set_long_mode(ha_tile_state[i], LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_font(ha_tile_state[i], &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ha_tile_state[i], &lv_font_ui_24, LV_PART_MAIN);
     lv_obj_align(ha_tile_state[i], LV_ALIGN_BOTTOM_LEFT, 0, 0);
   }
 

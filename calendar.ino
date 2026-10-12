@@ -168,11 +168,11 @@ void calendar_apply_to_ui()
   {
     int count = current ? calendar->month_event_count : 0;
     if (!calendar_has_feeds())
-      lv_label_set_text(cal_legend_lab, "No calendar configured - add an iCal URL on the setup page");
+      lv_label_set_text(cal_legend_lab, tr(S_NO_CAL_LONG));
     else if (!calendar_have_data)
-      lv_label_set_text(cal_legend_lab, calendar_fetch_failed ? "Calendar fetch failed - check the iCal URL" : "Calendar syncing...");
+      lv_label_set_text(cal_legend_lab, calendar_fetch_failed ? tr(S_CAL_FAILED) : tr(S_CAL_SYNC));
     else if (!current)
-      lv_label_set_text(cal_legend_lab, "Calendar syncing...");
+      lv_label_set_text(cal_legend_lab, tr(S_CAL_SYNC));
     else if (count == 0)
       lv_label_set_text(cal_legend_lab, "No events this month");
     else
@@ -243,9 +243,9 @@ void update_home_next_event()
         if (calendar->upcoming[i].start > now) ev = &calendar->upcoming[i];
 
     if (!calendar_has_feeds())
-      snprintf(line, sizeof(line), "No calendar configured");
+      snprintf(line, sizeof(line), "%s", tr(S_NO_CAL));
     else if (!ev)
-      snprintf(line, sizeof(line), calendar_have_data ? "Nothing scheduled" : "Calendar syncing...");
+      snprintf(line, sizeof(line), "%s", calendar_have_data ? tr(S_NOTHING) : tr(S_CAL_SYNC));
     else
     {
       struct tm st, nt;
@@ -260,8 +260,8 @@ void update_home_next_event()
       int day_diff = (int)((mktime(&b) - mktime(&a) + 43200) / 86400);
 
       char when[24];
-      if (day_diff == 0) snprintf(when, sizeof(when), "Today");
-      else if (day_diff == 1) snprintf(when, sizeof(when), "Tomorrow");
+      if (day_diff == 0) snprintf(when, sizeof(when), "%s", tr(S_TODAY));
+      else if (day_diff == 1) snprintf(when, sizeof(when), "%s", tr(S_TOMORROW));
       else snprintf(when, sizeof(when), "%s", WEEKDAY_NAMES[st.tm_wday % 7]);
       if (!ev->all_day)
       {
@@ -313,7 +313,12 @@ void open_calendar_day_screen(int day)
   }
 
   int wday = cal_day_of_week_sun0(ty, tmon, day); // 0=Sunday, matches WEEKDAY_NAMES
-  if (cal_day_title_lab) lv_label_set_text_fmt(cal_day_title_lab, "%s, %s %d", WEEKDAY_NAMES[wday], MONTH_NAMES[clock_mon % 12], day);
+  if (cal_day_title_lab)
+  {
+    char d[48];
+    format_long_date(d, sizeof(d), wday, clock_mon, day);
+    lv_label_set_text(cal_day_title_lab, d);
+  }
 
   int n = calendar->day_count[day];
   if (n > CALENDAR_MAX_EVENTS_PER_DAY) n = CALENDAR_MAX_EVENTS_PER_DAY;
@@ -325,8 +330,8 @@ void open_calendar_day_screen(int day)
     {
       lv_obj_clear_flag(cal_day_row[i], LV_OBJ_FLAG_HIDDEN);
       CalendarEvent &ev = calendar->days[day][i];
-      if (cal_day_row_time[i]) lv_label_set_text(cal_day_row_time[i], ev.all_day ? "All day" : ev.time);
-      if (cal_day_row_title[i]) lv_label_set_text(cal_day_row_title[i], ev.title[0] ? ev.title : "(untitled event)");
+      if (cal_day_row_time[i]) lv_label_set_text(cal_day_row_time[i], ev.all_day ? tr(S_ALL_DAY) : ev.time);
+      if (cal_day_row_title[i]) lv_label_set_text(cal_day_row_title[i], ev.title[0] ? ev.title : tr(S_UNTITLED));
     }
     else
     {
@@ -370,13 +375,13 @@ lv_obj_t *create_calendar_day_screen()
 
   cal_day_title_lab = lv_label_create(scr);
   lv_obj_set_style_text_color(cal_day_title_lab, COLOR_PRIMARY, LV_PART_MAIN);
-  lv_obj_set_style_text_font(cal_day_title_lab, &lv_font_montserrat_28, LV_PART_MAIN);
+  lv_obj_set_style_text_font(cal_day_title_lab, &lv_font_ui_28, LV_PART_MAIN);
   lv_obj_align(cal_day_title_lab, LV_ALIGN_TOP_MID, 0, 26);
 
   cal_day_empty_lab = lv_label_create(scr);
-  lv_label_set_text(cal_day_empty_lab, "No events scheduled");
+  lv_label_set_text(cal_day_empty_lab, tr(S_NO_EVENTS));
   lv_obj_set_style_text_color(cal_day_empty_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(cal_day_empty_lab, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_font(cal_day_empty_lab, &lv_font_ui_16, LV_PART_MAIN);
   lv_obj_align(cal_day_empty_lab, LV_ALIGN_TOP_MID, 0, 200);
   lv_obj_add_flag(cal_day_empty_lab, LV_OBJ_FLAG_HIDDEN);
 
@@ -399,7 +404,7 @@ lv_obj_t *create_calendar_day_screen()
     lv_obj_t *time_lab = lv_label_create(row);
     lv_label_set_text(time_lab, "--:--");
     lv_obj_set_style_text_color(time_lab, COLOR_PRIMARY, LV_PART_MAIN);
-    lv_obj_set_style_text_font(time_lab, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_style_text_font(time_lab, &lv_font_ui_16, LV_PART_MAIN);
     lv_obj_set_width(time_lab, 70);
     lv_obj_align(time_lab, LV_ALIGN_LEFT_MID, 16, 0);
     cal_day_row_time[i] = time_lab;
@@ -407,7 +412,7 @@ lv_obj_t *create_calendar_day_screen()
     lv_obj_t *title_lab = lv_label_create(row);
     lv_label_set_text(title_lab, "");
     lv_obj_set_style_text_color(title_lab, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(title_lab, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_style_text_font(title_lab, &lv_font_ui_16, LV_PART_MAIN);
     lv_obj_set_width(title_lab, 320);
     lv_label_set_long_mode(title_lab, LV_LABEL_LONG_DOT);
     lv_obj_align(title_lab, LV_ALIGN_LEFT_MID, 96, 0);
@@ -426,10 +431,10 @@ lv_obj_t *create_calendar_screen()
 
   cal_title_lab = lv_label_create(scr);
   lv_obj_set_style_text_color(cal_title_lab, COLOR_PRIMARY, LV_PART_MAIN);
-  lv_obj_set_style_text_font(cal_title_lab, &lv_font_montserrat_28, LV_PART_MAIN);
+  lv_obj_set_style_text_font(cal_title_lab, &lv_font_ui_28, LV_PART_MAIN);
   lv_obj_align(cal_title_lab, LV_ALIGN_TOP_MID, 0, 20);
 
-  static const char *day_letters[7] = {"M", "T", "W", "T", "F", "S", "S"};
+  const char *letters = tr(S_DAY_LETTERS); // Monday first
   const lv_coord_t grid_x = 16;
   const lv_coord_t grid_top = 70;
   const lv_coord_t cell_w = 64;
@@ -439,9 +444,10 @@ lv_obj_t *create_calendar_screen()
   for (int c = 0; c < 7; c++)
   {
     lv_obj_t *h = lv_label_create(scr);
-    lv_label_set_text(h, day_letters[c]);
+    char one[2] = {letters[c], '\0'};
+    lv_label_set_text(h, one);
     lv_obj_set_style_text_color(h, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_text_font(h, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(h, &lv_font_ui_14, LV_PART_MAIN);
     lv_obj_set_style_text_align(h, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_width(h, cell_w);
     lv_obj_set_pos(h, grid_x + c * cell_w, grid_top);
@@ -468,11 +474,11 @@ lv_obj_t *create_calendar_screen()
     // both sit in the middle of the circle (a content-sized label at a fixed
     // offset left single digits off-center).
     lv_obj_t *lab = lv_label_create(scr);
-    lv_obj_set_style_text_font(lab, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_style_text_font(lab, &lv_font_ui_16, LV_PART_MAIN);
     lv_obj_set_style_text_align(lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_width(lab, 34);
     lv_obj_add_flag(lab, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_pos(lab, cx - 17, cy - lv_font_montserrat_16.line_height / 2);
+    lv_obj_set_pos(lab, cx - 17, cy - lv_font_ui_16.line_height / 2);
     cal_cell_label[i] = lab;
 
     // Invisible full-cell touch target, on top so it - not the small dot -
@@ -490,7 +496,7 @@ lv_obj_t *create_calendar_screen()
 
   cal_legend_lab = lv_label_create(scr);
   lv_obj_set_style_text_color(cal_legend_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(cal_legend_lab, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(cal_legend_lab, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_align(cal_legend_lab, LV_ALIGN_BOTTOM_MID, 0, -46);
 
   calendar_apply_to_ui();
@@ -511,7 +517,7 @@ static void agenda_header(const char *text)
   lv_obj_t *lab = lv_label_create(agenda_list);
   lv_label_set_text(lab, text);
   lv_obj_set_style_text_color(lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(lab, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(lab, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_set_style_text_letter_space(lab, 1, LV_PART_MAIN);
   lv_obj_set_style_pad_top(lab, 6, LV_PART_MAIN);
 }
@@ -530,13 +536,13 @@ static void agenda_row(const char *when, const char *title, bool past)
   lv_obj_t *t = lv_label_create(row);
   lv_label_set_text(t, when);
   lv_obj_set_style_text_color(t, past ? COLOR_TEXT_MUTED : COLOR_PRIMARY, LV_PART_MAIN);
-  lv_obj_set_style_text_font(t, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_font(t, &lv_font_ui_16, LV_PART_MAIN);
   lv_obj_align(t, LV_ALIGN_LEFT_MID, 14, 0);
 
   lv_obj_t *n = lv_label_create(row);
-  lv_label_set_text(n, title[0] ? title : "(untitled event)");
+  lv_label_set_text(n, title[0] ? title : tr(S_UNTITLED));
   lv_obj_set_style_text_color(n, past ? COLOR_TEXT_MUTED : lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(n, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_font(n, &lv_font_ui_16, LV_PART_MAIN);
   lv_obj_set_width(n, 330);
   lv_label_set_long_mode(n, LV_LABEL_LONG_DOT);
   lv_obj_align(n, LV_ALIGN_LEFT_MID, 96, 0);
@@ -547,8 +553,9 @@ static void agenda_add_day(int which /* 0 today, 1 tomorrow */, time_t now)
   struct tm d;
   time_t t = now + which * 86400;
   localtime_r(&t, &d);
-  char hdr[48];
-  snprintf(hdr, sizeof(hdr), "%s  -  %s %d", which ? "TOMORROW" : "TODAY", MONTH_NAMES[d.tm_mon % 12], d.tm_mday);
+  char hdr[64], dm[32];
+  format_day_month(dm, sizeof(dm), d.tm_mon, d.tm_mday);
+  snprintf(hdr, sizeof(hdr), "%s  -  %s", which ? tr(S_TOMORROW_UP) : tr(S_TODAY_UP), dm);
   agenda_header(hdr);
 
   int shown = 0;
@@ -558,7 +565,7 @@ static void agenda_add_day(int which /* 0 today, 1 tomorrow */, time_t now)
     for (int i = 0; i < calendar->day_count[d.tm_mday] && i < CALENDAR_MAX_EVENTS_PER_DAY; i++)
     {
       CalendarEvent &ev = calendar->days[d.tm_mday][i];
-      agenda_row(ev.all_day ? "All day" : ev.time, ev.title, which == 0 && !ev.all_day && ev.start < now);
+      agenda_row(ev.all_day ? tr(S_ALL_DAY) : ev.time, ev.title, which == 0 && !ev.all_day && ev.start < now);
       shown++;
     }
   }
@@ -572,11 +579,11 @@ static void agenda_add_day(int which /* 0 today, 1 tomorrow */, time_t now)
       if (s.tm_yday != d.tm_yday || s.tm_year != d.tm_year) continue;
       char when[8];
       strftime(when, sizeof(when), "%H:%M", &s);
-      agenda_row(ev.all_day ? "All day" : when, ev.title, false);
+      agenda_row(ev.all_day ? tr(S_ALL_DAY) : when, ev.title, false);
       shown++;
     }
   }
-  if (!shown) agenda_row("", calendar_has_feeds() ? "Nothing scheduled" : "No calendar configured", true);
+  if (!shown) agenda_row("", calendar_has_feeds() ? tr(S_NOTHING) : tr(S_NO_CAL), true);
 }
 
 void open_agenda_screen()
@@ -590,7 +597,7 @@ void open_agenda_screen()
     agenda_add_day(0, now);
     agenda_add_day(1, now);
   }
-  else agenda_header("Waiting for the clock to sync...");
+  else agenda_header(tr(S_WAIT_CLOCK));
   data_unlock();
   lv_obj_scroll_to_y(agenda_list, 0, LV_ANIM_OFF);
   open_subscreen(agenda_screen);
@@ -612,9 +619,9 @@ lv_obj_t *create_agenda_screen()
   make_back_button(scr);
 
   lv_obj_t *title = lv_label_create(scr);
-  lv_label_set_text(title, "Agenda");
+  lv_label_set_text(title, tr(S_AGENDA));
   lv_obj_set_style_text_color(title, COLOR_PRIMARY, LV_PART_MAIN);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_28, LV_PART_MAIN);
+  lv_obj_set_style_text_font(title, &lv_font_ui_28, LV_PART_MAIN);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 22);
 
   // Scrolls vertically when there are many events.

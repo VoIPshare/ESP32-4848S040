@@ -314,12 +314,12 @@ void update_home_bambu_badge()
     {
       // Progress and time left, e.g. "PRINTING 42% - 1h 05m".
       if (strcmp(bambu.gcode_state, "RUNNING") == 0 && bambu.remain_time_min > 0)
-        lv_label_set_text_fmt(home_bambu_badge_lab, "PRINTING %d%%  -  %dh %02dm", bambu.percent,
+        lv_label_set_text_fmt(home_bambu_badge_lab, "%s %d%%  -  %dh %02dm", tr(S_PRINTING), bambu.percent,
                               bambu.remain_time_min / 60, bambu.remain_time_min % 60);
       else if (strcmp(bambu.gcode_state, "RUNNING") == 0)
-        lv_label_set_text_fmt(home_bambu_badge_lab, "PRINTING %d%%", bambu.percent);
+        lv_label_set_text_fmt(home_bambu_badge_lab, "%s %d%%", tr(S_PRINTING), bambu.percent);
       else
-        lv_label_set_text(home_bambu_badge_lab, "PREPARING");
+        lv_label_set_text(home_bambu_badge_lab, tr(S_PREPARING));
       lv_obj_set_style_text_color(home_bambu_badge_lab, lv_color_hex(0x2B1600), LV_PART_MAIN);
     }
     if (home_bambu_badge)
@@ -332,7 +332,7 @@ void update_home_bambu_badge()
   {
     if (home_bambu_badge_lab)
     {
-      lv_label_set_text(home_bambu_badge_lab, "PRINT FINISHED");
+      lv_label_set_text(home_bambu_badge_lab, tr(S_PRINT_FINISHED));
       lv_obj_set_style_text_color(home_bambu_badge_lab, lv_color_hex(0x0B2E13), LV_PART_MAIN);
     }
     if (home_bambu_badge)
@@ -381,10 +381,17 @@ void bambu_apply_to_ui()
   bool was_printing_ish = strcmp(bambu_prev_gcode_state, "RUNNING") == 0 ||
                            strcmp(bambu_prev_gcode_state, "PREPARE") == 0 ||
                            strcmp(bambu_prev_gcode_state, "PAUSE") == 0;
+  ph_note_state(bambu_prev_gcode_state, bambu.gcode_state);
   if (strcmp(bambu.gcode_state, "FAILED") == 0 && was_printing_ish)
-    alert_show(LV_SYMBOL_WARNING "  Print failed", lv_color_hex(0xC62828), 60000UL);
+  {
+    char msg[64];
+    snprintf(msg, sizeof(msg), LV_SYMBOL_WARNING "  %s", tr(S_PRINT_FAILED));
+    alert_show(msg, lv_color_hex(0xC62828), 60000UL);
+    ph_record(bambu.job_name, false);
+  }
   if (strcmp(bambu.gcode_state, "FINISH") == 0 && was_printing_ish)
   {
+    ph_record(bambu.job_name, true);
     bambu_finish_badge_until_ms = millis() + BAMBU_FINISH_BADGE_MS;
     start_finish_screen_flash();
     // If we're showing the Bambu screen because this print auto-opened it,
@@ -411,7 +418,8 @@ void bambu_apply_to_ui()
   bambu_prev_gcode_state[sizeof(bambu_prev_gcode_state) - 1] = '\0';
   update_home_bambu_badge();
 
-  if (bambu_pname_lab) lv_label_set_text(bambu_pname_lab, bambu_live_product_name[0] ? bambu_live_product_name : settings.printer_name);
+  if (bambu_pname_lab)
+    lv_label_set_text_fmt(bambu_pname_lab, "%s  " LV_SYMBOL_LIST, bambu_live_product_name[0] ? bambu_live_product_name : settings.printer_name);
   if (bambu_job_lab)
   {
     if (bambu.has_warning)
@@ -479,7 +487,13 @@ void bambu_apply_to_ui()
   if (bambu.amsCount > 0)
   {
     if (bambu_ams_temp_val) lv_label_set_text_fmt(bambu_ams_temp_val, "%.0f\xC2\xB0" "C", bambu.ams[0].temp);
-    if (bambu_ams_hum_val) lv_label_set_text_fmt(bambu_ams_hum_val, "%d%%", bambu.ams[0].humidity);
+    if (bambu_ams_hum_val)
+    {
+      // Filament starts to suffer above ~40% - orange, then red.
+      int h = bambu.ams[0].humidity;
+      lv_label_set_text_fmt(bambu_ams_hum_val, "%d%%", h);
+      lv_obj_set_style_text_color(bambu_ams_hum_val, h >= 50 ? lv_color_hex(0xEF5350) : h >= 40 ? COLOR_SECONDARY : COLOR_PRIMARY, LV_PART_MAIN);
+    }
   }
   else
   {
@@ -826,10 +840,14 @@ lv_obj_t *create_bambu_screen()
   lv_obj_clear_flag(pcard, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t *pname = lv_label_create(pcard);
-  lv_label_set_text(pname, settings.printer_name);
+  lv_label_set_text_fmt(pname, "%s  " LV_SYMBOL_LIST, settings.printer_name); // tap: print history
   lv_obj_set_style_text_color(pname, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(pname, &lv_font_montserrat_18, LV_PART_MAIN);
+  lv_obj_set_style_text_font(pname, &lv_font_ui_18, LV_PART_MAIN);
   lv_obj_align(pname, LV_ALIGN_TOP_LEFT, 0, 2);
+  lv_obj_add_flag(pname, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(pname, LV_OBJ_FLAG_GESTURE_BUBBLE);
+  lv_obj_set_ext_click_area(pname, 14);
+  lv_obj_add_event_cb(pname, open_print_history, LV_EVENT_SHORT_CLICKED, NULL);
   bambu_pname_lab = pname;
 
   lv_obj_t *pstatus_pill_lab = NULL;
@@ -841,7 +859,7 @@ lv_obj_t *create_bambu_screen()
   lv_obj_t *job = lv_label_create(pcard);
   lv_label_set_text(job, "Benchy_v2.gcode");
   lv_obj_set_style_text_color(job, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(job, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(job, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_align(job, LV_ALIGN_TOP_LEFT, 0, 40);
   bambu_job_lab = job;
 
@@ -859,7 +877,7 @@ lv_obj_t *create_bambu_screen()
   lv_obj_t *prog = lv_label_create(pcard);
   lv_label_set_text(prog, "75% complete  -  1h 24m left");
   lv_obj_set_style_text_color(prog, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(prog, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(prog, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_align(prog, LV_ALIGN_TOP_LEFT, 0, 110);
   bambu_prog_lab = prog;
 
@@ -876,7 +894,7 @@ lv_obj_t *create_bambu_screen()
   // Chip widths are sized to each caption's actual rendered width (the
   // widest text in that chip) rather than split evenly - "BED/CHAMBER" at
   // font 12 needs ~102px on its own, while the others need well under 100.
-  make_stat_chip(temps, "230°C", "NOZZLE", COLOR_SECONDARY, &bambu_nozzle_val, 80, &lv_font_montserrat_22, LV_FLEX_ALIGN_END);
+  make_stat_chip(temps, "230°C", "NOZZLE", COLOR_SECONDARY, &bambu_nozzle_val, 80, &lv_font_ui_22, LV_FLEX_ALIGN_END);
   make_stat_chip2(temps, "55°C", "35°C", "BED/CHAMBER", COLOR_SECONDARY, &bambu_bed_val, &bambu_chamber_val, 140);
   make_stat_chip2(temps, "142", "320", "LAYER", COLOR_PRIMARY, &bambu_layer_cur_val, &bambu_layer_tot_val, 80);
   make_stat_chip2(temps, "--\xC2\xB0" "C", "--%", "AMS", COLOR_PRIMARY, &bambu_ams_temp_val, &bambu_ams_hum_val, 90);
@@ -928,13 +946,13 @@ lv_obj_t *create_bambu_screen()
     lv_obj_t *fname = lv_label_create(pcard);
     lv_label_set_text(fname, fan_names[i]);
     lv_obj_set_style_text_color(fname, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_text_font(fname, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(fname, &lv_font_ui_12, LV_PART_MAIN);
     lv_obj_set_pos(fname, fan_x + 30, 224);
 
     lv_obj_t *fpct = lv_label_create(pcard);
     lv_label_set_text(fpct, "--");
     lv_obj_set_style_text_color(fpct, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(fpct, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_font(fpct, &lv_font_ui_14, LV_PART_MAIN);
     lv_obj_set_pos(fpct, fan_x + 30, 240);
     bambu_fan_pct_lab[i] = fpct;
   }
@@ -949,7 +967,7 @@ lv_obj_t *create_bambu_screen()
   lv_obj_t *ams_lab = lv_label_create(pcard);
   lv_label_set_text(ams_lab, "AMS");
   lv_obj_set_style_text_color(ams_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(ams_lab, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_style_text_font(ams_lab, &lv_font_ui_12, LV_PART_MAIN);
   lv_obj_set_style_text_letter_space(ams_lab, 1, LV_PART_MAIN);
   lv_obj_align(ams_lab, LV_ALIGN_TOP_LEFT, 0, 274);
 
@@ -995,7 +1013,7 @@ lv_obj_t *create_bambu_screen()
     lv_obj_t *pct = lv_label_create(pcard);
     lv_label_set_text_fmt(pct, "%d%%", spool_percent[i]);
     lv_obj_set_style_text_color(pct, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_text_font(pct, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(pct, &lv_font_ui_12, LV_PART_MAIN);
     lv_obj_set_pos(pct, 382, row_y - 3);
 
     bambu_slot_bar[i] = slot_bar;

@@ -36,7 +36,7 @@ void create_alert_banner()
   lv_obj_set_width(alert_lab, 408);
   lv_label_set_long_mode(alert_lab, LV_LABEL_LONG_DOT);
   lv_obj_set_style_text_color(alert_lab, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(alert_lab, &lv_font_montserrat_18, LV_PART_MAIN);
+  lv_obj_set_style_text_font(alert_lab, &lv_font_ui_18, LV_PART_MAIN);
   lv_obj_center(alert_lab);
 }
 

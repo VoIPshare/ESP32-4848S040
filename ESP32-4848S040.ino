@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.9"
+#define FW_VERSION "3.10"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -34,6 +34,7 @@
 #include "calendar_types.h"
 #include "direct_fetch.h"
 #include "gh_update.h"
+#include "lang.h"
 
 // Set to 0 to silence verbose diagnostic Serial output (raw JSON dumps,
 // parsed-field traces) - e.g. once a field mapping is confirmed working and
@@ -61,6 +62,19 @@ enum WeatherIconType { WICON_CLEAR, WICON_PARTLY_CLOUDY, WICON_CLOUDY, WICON_FOG
 // the clock and the weather temperature - see lv_font_roboto_regular_86.c.
 extern "C" {
 extern const lv_font_t lv_font_roboto_regular_86;
+// UI text: LVGL's built-in Montserrat (same file, same symbols) plus Latin-1
+// accents and typographic quotes, for Italian/French and accented titles.
+// Made with lv_font_conv - see the README.
+LV_FONT_DECLARE(lv_font_ui_12);
+LV_FONT_DECLARE(lv_font_ui_14);
+LV_FONT_DECLARE(lv_font_ui_16);
+LV_FONT_DECLARE(lv_font_ui_18);
+LV_FONT_DECLARE(lv_font_ui_20);
+LV_FONT_DECLARE(lv_font_ui_22);
+LV_FONT_DECLARE(lv_font_ui_24);
+LV_FONT_DECLARE(lv_font_ui_26);
+LV_FONT_DECLARE(lv_font_ui_28);
+
 // Bigger, bold digits-and-colon-only Roboto for the Home clock.
 extern const lv_font_t lv_font_roboto_bold_136;
 // Home screen shortcut icons (Material Design Icons) - see home_icons.c /
@@ -198,6 +212,14 @@ static bool in_settings = false;
 // Detail pages outside screens[] (Calendar day, Forecast, Agenda) - see
 // open_subscreen(). current_screen keeps the page they were opened from.
 static bool in_subscreen = false;
+// Firmware update running (setup page upload or GitHub) - see ota_apply_to_ui().
+static volatile bool ota_in_progress = false;
+static volatile uint32_t ota_started_ms = 0;
+// Writing flash keeps the panel from reading its picture, so it flickers
+// whatever is on it: after showing the card for a moment the backlight goes
+// off until the restart (see backlight_update()).
+#define OTA_DARK_AFTER_MS 2500
+
 // Why the board last restarted, when it wasn't planned (see restart_reason_init()).
 static const char *restart_reason = "";
 static uint16_t crash_count = 0;
@@ -384,6 +406,7 @@ struct DeviceSettings
   // an icon on Home to accept/skip, UPDATE_AUTO installs by itself,
   // UPDATE_OFF never checks on its own (the Settings button still works).
   uint8_t update_mode = UPDATE_NOTIFY;
+  uint8_t lang = LANG_EN; // LANG_EN / LANG_IT / LANG_FR - see lang.h
   char update_skip[16] = ""; // version the user chose to skip
   uint8_t home_shortcuts = SHORTCUTS_ON_TAP; // SHORTCUTS_ALWAYS (icons on Home) / _ON_TAP (top-left menu) / _OFF
   // Proxmox VE cluster - see proxmox.ino. host is "ip-or-hostname:port"
@@ -434,6 +457,7 @@ void clock_tick_cb(lv_timer_t *timer)
   wifi_indicator_update_visibility();
   backlight_update();
   alert_tick();
+  quick_panel_tick();
 
   // Auto-hide the page-position dots after 10 s of no touch activity (a
   // touch brings them back - see my_touchpad_read()).
@@ -534,6 +558,11 @@ void backlight_set(uint8_t pct)
 #endif
 }
 
+// "Dim now" from the quick panel: dims (and shows the night clock) right
+// away, day or night, until the next touch - see my_touchpad_read().
+static bool dim_forced = false;
+static uint32_t dim_forced_at = 0;
+
 bool night_now()
 {
   if (!settings.night_dim || !clock_synced_once) return false;
@@ -545,7 +574,7 @@ bool night_now()
 // Once a second from clock_tick_cb(), and right away on a touch.
 void backlight_update()
 {
-  bool dim = night_now() && millis() - last_activity_ms > NIGHT_DIM_IDLE_MS;
+  bool dim = dim_forced || (night_now() && millis() - last_activity_ms > NIGHT_DIM_IDLE_MS);
   static bool was_dim = false;
   if (dim != was_dim)
   {
@@ -555,6 +584,7 @@ void backlight_update()
                   (unsigned long)((millis() - last_activity_ms) / 1000));
   }
   uint8_t want = dim ? settings.night_level : settings.day_level;
+  if (ota_in_progress && millis() - ota_started_ms > OTA_DARK_AFTER_MS) want = 0; // updating: dark, no flicker
   screensaver_update();
   if (screensaver_visible() && want < SAVER_MIN_LEVEL) want = SAVER_MIN_LEVEL;
   if (want != backlight_level) backlight_set(want);
@@ -570,11 +600,21 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
     // dashboard - nothing underneath gets pressed.
     touch_swallow = true;
     last_activity_ms = millis();
+    dim_forced = false;
     backlight_update();
     data->state = LV_INDEV_STATE_REL;
     return;
   }
   touch_swallow = false;
+  static bool was_touched = false;
+  static lv_coord_t start_x, start_y, last_x, last_y;
+  if (!ts.isTouched && was_touched)
+  {
+    // Released: a swipe down from the top edge opens the quick panel.
+    was_touched = false;
+    if (start_y < 50 && start_x > 80 && start_x < 400 && last_y - start_y > 90 && abs(last_x - start_x) < 90)
+      quick_panel_request();
+  }
   if (ts.isTouched)
   {
     last_activity_ms = millis();
@@ -599,6 +639,11 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
     data->state = LV_INDEV_STATE_PR;
     data->point.x = tx;
     data->point.y = ty;
+    if (!was_touched) { start_x = tx; start_y = ty; }
+    if (!was_touched && dim_forced && millis() - dim_forced_at > 1500) dim_forced = false; // (only if not swallowed above)
+    was_touched = true;
+    last_x = tx;
+    last_y = ty;
   }
   else
   {
@@ -814,7 +859,9 @@ void create_nav_menu()
   lv_obj_add_flag(nav_menu_backdrop, LV_OBJ_FLAG_HIDDEN);
 
   nav_menu_card = lv_obj_create(layer);
-  lv_obj_set_size(nav_menu_card, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  // Up to 5 icons per row (42 px + 6 px gaps + 8 px padding + border),
+  // wrapping onto a second row - a single row got too wide with 9 screens.
+  lv_obj_set_size(nav_menu_card, 5 * 42 + 4 * 6 + 2 * 8 + 2, LV_SIZE_CONTENT);
   lv_obj_align(nav_menu_card, LV_ALIGN_TOP_MID, 0, 10); // stays centered as the Flight icon comes and goes
   lv_obj_set_style_bg_color(nav_menu_card, lv_color_hex(0x10181F), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(nav_menu_card, LV_OPA_COVER, LV_PART_MAIN);
@@ -823,7 +870,9 @@ void create_nav_menu()
   lv_obj_set_style_radius(nav_menu_card, 16, LV_PART_MAIN);
   lv_obj_set_style_pad_all(nav_menu_card, 8, LV_PART_MAIN);
   lv_obj_set_style_pad_column(nav_menu_card, 6, LV_PART_MAIN);
-  lv_obj_set_flex_flow(nav_menu_card, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_row(nav_menu_card, 6, LV_PART_MAIN);
+  lv_obj_set_flex_flow(nav_menu_card, LV_FLEX_FLOW_ROW_WRAP);
+  lv_obj_set_flex_align(nav_menu_card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_clear_flag(nav_menu_card, LV_OBJ_FLAG_SCROLLABLE);
   for (size_t i = 0; i < SHORTCUT_COUNT; i++)
   {
@@ -870,6 +919,12 @@ void proxmox_badge_clicked_cb(lv_event_t *e)
 // indev) and this needs a different, shorter hold. Returns true when the
 // event was part of the hold, so the caller ignores it - including the
 // SHORT_CLICKED that can follow a completed hold.
+void pin_set(bool on)
+{
+  screen_pinned = on;
+  if (pin_indicator) (on ? lv_obj_clear_flag : lv_obj_add_flag)(pin_indicator, LV_OBJ_FLAG_HIDDEN);
+}
+
 bool pin_hold_event(lv_event_t *e)
 {
   lv_event_code_t code = lv_event_get_code(e);
@@ -883,12 +938,7 @@ bool pin_hold_event(lv_event_t *e)
     if (!pin_press_fired && pin_press_start_ms != 0 && millis() - pin_press_start_ms >= 3000)
     {
       pin_press_fired = true;
-      screen_pinned = !screen_pinned;
-      if (pin_indicator)
-      {
-        if (screen_pinned) lv_obj_clear_flag(pin_indicator, LV_OBJ_FLAG_HIDDEN);
-        else lv_obj_add_flag(pin_indicator, LV_OBJ_FLAG_HIDDEN);
-      }
+      pin_set(!screen_pinned);
     }
   }
   else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST)
@@ -1103,19 +1153,10 @@ WeatherIconType wmo_weather_icon(int code)
   return WICON_PARTLY_CLOUDY;
 }
 
+// In the screen language - see lang.h.
 const char *wmo_weather_desc(int code)
 {
-  if (code == 0) return "Clear Sky";
-  if (code == 1 || code == 2) return "Partly Cloudy";
-  if (code == 3) return "Overcast";
-  if (code == 45 || code == 48) return "Fog";
-  if (code >= 51 && code <= 57) return "Drizzle";
-  if (code >= 61 && code <= 67) return "Rain";
-  if (code >= 71 && code <= 77) return "Snow";
-  if (code >= 80 && code <= 82) return "Rain Showers";
-  if (code >= 85 && code <= 86) return "Snow Showers";
-  if (code >= 95) return "Thunderstorm";
-  return "Unknown";
+  return wmo_desc_lang(code);
 }
 
 // Plain (non-LVGL) result storage: fetch_weather() runs on network_task and
@@ -1155,10 +1196,10 @@ void weather_apply_to_ui()
   if (weather_extra_lab)
   {
     if (weather_data.has_daily)
-      lv_label_set_text_fmt(weather_extra_lab, "Feels like %.0f\xC2\xB0  \xE2\x80\xA2  H %.0f\xC2\xB0  L %.0f\xC2\xB0",
+      lv_label_set_text_fmt(weather_extra_lab, "%s %.0f\xC2\xB0  \xE2\x80\xA2  %s %.0f\xC2\xB0  %s %.0f\xC2\xB0", tr(S_FEELS),
                             weather_data.feels, weather_data.tmax, weather_data.tmin);
     else
-      lv_label_set_text_fmt(weather_extra_lab, "Feels like %.0f\xC2\xB0", weather_data.feels);
+      lv_label_set_text_fmt(weather_extra_lab, "%s %.0f\xC2\xB0", tr(S_FEELS), weather_data.feels);
   }
   set_weather_icon(wmo_weather_icon(weather_data.wcode), weather_data.is_day);
   if (weather_humidity_val) lv_label_set_text_fmt(weather_humidity_val, "%d%%", weather_data.humidity);
@@ -1409,6 +1450,8 @@ void load_settings()
   settings.day_level = prefs.getUChar("dlevel", settings.day_level);
   settings.night_clock = prefs.getBool("nclock", settings.night_clock);
   settings.update_mode = prefs.getUChar("updmode", settings.update_mode);
+  settings.lang = prefs.getUChar("lang", settings.lang);
+  ui_lang = settings.lang < LANG_COUNT ? settings.lang : LANG_EN;
   prefs.getString("updskip", settings.update_skip, sizeof(settings.update_skip));
   settings.home_shortcuts = prefs.getUChar("shortcuts", settings.home_shortcuts);
   prefs.getString("pxhost", settings.proxmox_host, sizeof(settings.proxmox_host));
@@ -1449,6 +1492,7 @@ void save_settings()
   prefs.putUChar("dlevel", settings.day_level);
   prefs.putBool("nclock", settings.night_clock);
   prefs.putUChar("updmode", settings.update_mode);
+  prefs.putUChar("lang", settings.lang);
   prefs.putString("updskip", settings.update_skip);
   prefs.putUChar("shortcuts", settings.home_shortcuts);
   prefs.putString("pxhost", settings.proxmox_host);
@@ -1538,6 +1582,24 @@ String build_settings_page()
       "<label style='margin-top:2px;font-size:11px'>A city, optionally with a 2-letter country code "
       "(<i>Montreal, CA</i>), or <i>latitude,longitude</i> (<i>45.50,-73.57</i>). Empty uses the city of the "
       "time zone above.</label>"
+      "</fieldset>"
+      "<fieldset><legend>Language</legend>"
+      "<select name='lang'>");
+  {
+    static const char *LANG_NAMES[] = {"English", "Italiano", "Fran\xC3\xA7" "ais"};
+    for (uint8_t i = 0; i < LANG_COUNT; i++)
+    {
+      page += "<option value='" + String(i) + "'";
+      if (settings.lang == i) page += " selected";
+      page += ">";
+      page += LANG_NAMES[i];
+      page += "</option>";
+    }
+  }
+  page += F(
+      "</select>"
+      "<label style='margin-top:2px;font-size:11px'>Dates, weather, Home, Calendar, Agenda, Forecast, Packages and "
+      "alerts. The technical screens stay in English.</label>"
       "</fieldset>"
       "<fieldset><legend>Home screen</legend>"
       "<label>Shortcut icons</label><select name='shortcuts'>");
@@ -1769,6 +1831,7 @@ void handle_save_post()
   if (config_server.hasArg("mqtt_pass")) config_server.arg("mqtt_pass").toCharArray(settings.mqtt_pass, sizeof(settings.mqtt_pass));
   if (config_server.hasArg("ssid")) config_server.arg("ssid").toCharArray(settings.sta_ssid, sizeof(settings.sta_ssid));
   if (config_server.hasArg("pass")) config_server.arg("pass").toCharArray(settings.sta_pass, sizeof(settings.sta_pass));
+  if (config_server.hasArg("lang")) settings.lang = (uint8_t)constrain(config_server.arg("lang").toInt(), 0, LANG_COUNT - 1);
   if (config_server.hasArg("updmode")) settings.update_mode = (uint8_t)constrain(config_server.arg("updmode").toInt(), 0, 2);
   if (config_server.hasArg("ndim_form")) // unchecked boxes aren't sent
   {
@@ -1851,7 +1914,6 @@ void handle_save_post()
 
 // Firmware upload from the setup page (see build_settings_page()). Runs on
 // network_task; the screen shows "Updating firmware" via ota_apply_to_ui().
-static volatile bool ota_in_progress = false;
 static volatile uint8_t ota_percent = 0;
 static volatile bool ota_needs_ui_refresh = false;
 
@@ -1892,9 +1954,11 @@ void gh_update_maintain()
     gh_install_request = false;
     gh_state = GH_INSTALLING;
     ota_in_progress = true;
+    ota_started_ms = millis();
     ota_percent = 0;
     ota_needs_ui_refresh = true;
     gh_needs_ui_refresh = true;
+    vTaskDelay(pdMS_TO_TICKS(OTA_DARK_AFTER_MS + 500)); // let the card be read before the screen goes dark
     gh_install(gh_latest, gh_progress, gh_error, sizeof(gh_error)); // restarts on success
     ota_in_progress = false;
     ota_needs_ui_refresh = true;
@@ -1948,6 +2012,7 @@ void handle_update_upload()
   {
     Serial.printf("[OTA] receiving %s\n", up.filename.c_str());
     ota_in_progress = true;
+    ota_started_ms = millis();
     ota_percent = 0;
     ota_needs_ui_refresh = true;
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
@@ -2431,9 +2496,7 @@ bool sync_clock_ntp()
   }
 }
 
-static const char *WEEKDAY_NAMES[7] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
-static const char *MONTH_NAMES[12] = {"January", "February", "March", "April", "May", "June",
-                                       "July", "August", "September", "October", "November", "December"};
+// WEEKDAY_NAMES / MONTH_NAMES: see lang.h (they follow the language setting).
 
 // Copies the system's local time into clock_* - true when it's set.
 bool clock_read_local()
@@ -2458,7 +2521,12 @@ void clock_apply_to_ui()
   clock_read_local();
   if (home_hour_label) lv_label_set_text_fmt(home_hour_label, "%02d", clock_hour);
   if (home_min_label) lv_label_set_text_fmt(home_min_label, "%02d", clock_min);
-  if (home_date_label) lv_label_set_text_fmt(home_date_label, "%s, %s %d", WEEKDAY_NAMES[clock_wday % 7], MONTH_NAMES[clock_mon % 12], clock_mday);
+  if (home_date_label)
+  {
+    char d[48];
+    format_long_date(d, sizeof(d), clock_wday, clock_mon, clock_mday);
+    lv_label_set_text(home_date_label, d);
+  }
 }
 
 // The only exit from Settings: turns the setup AP off (if on) and connects
@@ -2543,7 +2611,7 @@ void open_settings_cb(lv_event_t *e)
 
 // Small rounded stat card with a big value on top and a muted caption below.
 // Used for weather stats and printer temps/spool so the whole UI reads as one system.
-lv_obj_t *make_stat_chip(lv_obj_t *parent, const char *value, const char *label, lv_color_t value_color, lv_obj_t **value_label_out = NULL, lv_coord_t chip_width = 132, const lv_font_t *value_font = &lv_font_montserrat_22, lv_flex_align_t main_place = LV_FLEX_ALIGN_CENTER, lv_coord_t chip_height = 74)
+lv_obj_t *make_stat_chip(lv_obj_t *parent, const char *value, const char *label, lv_color_t value_color, lv_obj_t **value_label_out = NULL, lv_coord_t chip_width = 132, const lv_font_t *value_font = &lv_font_ui_22, lv_flex_align_t main_place = LV_FLEX_ALIGN_CENTER, lv_coord_t chip_height = 74)
 {
   lv_obj_t *chip = lv_obj_create(parent);
   lv_obj_set_size(chip, chip_width, chip_height);
@@ -2568,7 +2636,7 @@ lv_obj_t *make_stat_chip(lv_obj_t *parent, const char *value, const char *label,
   lv_obj_t *lab = lv_label_create(chip);
   lv_label_set_text(lab, label);
   lv_obj_set_style_text_color(lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(lab, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_style_text_font(lab, &lv_font_ui_12, LV_PART_MAIN);
   lv_obj_set_style_text_letter_space(lab, 1, LV_PART_MAIN);
 
   return chip;
@@ -2583,7 +2651,7 @@ lv_obj_t *make_stat_chip(lv_obj_t *parent, const char *value, const char *label,
 // comfortably, so the caller picks whichever fits.
 lv_obj_t *make_stat_chip2(lv_obj_t *parent, const char *line1, const char *line2, const char *label,
                            lv_color_t value_color, lv_obj_t **line1_out = NULL, lv_obj_t **line2_out = NULL,
-                           lv_coord_t chip_width = 132, const lv_font_t *value_font = &lv_font_montserrat_16)
+                           lv_coord_t chip_width = 132, const lv_font_t *value_font = &lv_font_ui_16)
 {
   lv_obj_t *chip = lv_obj_create(parent);
   lv_obj_set_size(chip, chip_width, 74);
@@ -2616,7 +2684,7 @@ lv_obj_t *make_stat_chip2(lv_obj_t *parent, const char *line1, const char *line2
     lv_obj_t *lab = lv_label_create(chip);
     lv_label_set_text(lab, label);
     lv_obj_set_style_text_color(lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_text_font(lab, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(lab, &lv_font_ui_12, LV_PART_MAIN);
     lv_obj_set_style_text_letter_space(lab, 1, LV_PART_MAIN);
   }
 
@@ -2638,7 +2706,7 @@ lv_obj_t *make_pill(lv_obj_t *parent, const char *text, lv_color_t bg_color, lv_
   lv_obj_t *lab = lv_label_create(pill);
   lv_label_set_text(lab, text);
   lv_obj_set_style_text_color(lab, text_color, LV_PART_MAIN);
-  lv_obj_set_style_text_font(lab, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(lab, &lv_font_ui_14, LV_PART_MAIN);
   if (text_label_out) *text_label_out = lab;
 
   return pill;
@@ -2883,7 +2951,7 @@ lv_obj_t *create_home_screen()
   lv_obj_t *date_val = lv_label_create(clock_panel);
   lv_label_set_text(date_val, "Saturday, August 15"); // placeholder until clock_apply_to_ui() runs post-NTP-sync
   lv_obj_set_style_text_color(date_val, lv_color_hex(0xB0BEC5), LV_PART_MAIN);
-  lv_obj_set_style_text_font(date_val, &lv_font_montserrat_18, LV_PART_MAIN);
+  lv_obj_set_style_text_font(date_val, &lv_font_ui_18, LV_PART_MAIN);
   lv_obj_align(date_val, LV_ALIGN_CENTER, 0, 78);
   home_date_label = date_val;
 
@@ -2931,7 +2999,7 @@ lv_obj_t *create_home_screen()
   // strip above the weather icon (which starts at y=30 within this panel),
   // clear of the clock above and the icon/temperature below.
   lv_obj_t *bambu_badge_lab = NULL;
-  home_bambu_badge = make_pill(weather_panel, "PRINTING", COLOR_SECONDARY, lv_color_hex(0x2B1600), &bambu_badge_lab);
+  home_bambu_badge = make_pill(weather_panel, tr(S_PRINTING), COLOR_SECONDARY, lv_color_hex(0x2B1600), &bambu_badge_lab);
   lv_obj_align(home_bambu_badge, LV_ALIGN_TOP_LEFT, 20, 4);
   home_bambu_badge_lab = bambu_badge_lab;
   lv_obj_add_flag(home_bambu_badge, LV_OBJ_FLAG_HIDDEN);
@@ -2943,7 +3011,7 @@ lv_obj_t *create_home_screen()
   // the same time a node drops doesn't stack the two badges on top of
   // each other.
   lv_obj_t *proxmox_badge_lab = NULL;
-  home_proxmox_badge = make_pill(weather_panel, "NODE OFFLINE", lv_color_hex(0xEF5350), lv_color_hex(0xFFFFFF), &proxmox_badge_lab);
+  home_proxmox_badge = make_pill(weather_panel, tr(S_NODE_OFFLINE), lv_color_hex(0xEF5350), lv_color_hex(0xFFFFFF), &proxmox_badge_lab);
   lv_obj_align(home_proxmox_badge, LV_ALIGN_TOP_RIGHT, -20, 4);
   home_proxmox_badge_lab = proxmox_badge_lab;
   lv_obj_add_flag(home_proxmox_badge, LV_OBJ_FLAG_HIDDEN);
@@ -2963,7 +3031,7 @@ lv_obj_t *create_home_screen()
   lv_obj_t *extra = lv_label_create(weather_panel);
   lv_label_set_text(extra, "");
   lv_obj_set_style_text_color(extra, lv_color_hex(0xB0BEC5), LV_PART_MAIN);
-  lv_obj_set_style_text_font(extra, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_font(extra, &lv_font_ui_16, LV_PART_MAIN);
   lv_obj_align(extra, LV_ALIGN_TOP_RIGHT, -24, 104); // clear gap under the big temperature
   weather_extra_lab = extra;
 
@@ -2971,7 +3039,7 @@ lv_obj_t *create_home_screen()
   lv_obj_t *desc = lv_label_create(weather_panel);
   lv_label_set_text(desc, "Partly Cloudy");
   lv_obj_set_style_text_color(desc, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(desc, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_font(desc, &lv_font_ui_16, LV_PART_MAIN);
   lv_obj_set_width(desc, 210);
   lv_obj_set_style_text_align(desc, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_set_pos(desc, 8, 141);
@@ -2994,9 +3062,9 @@ lv_obj_t *create_home_screen()
   // this row, via the trailing chip_height param (appended after
   // main_place rather than inserted earlier, so bambu.ino's fully-
   // positional NOZZLE chip call doesn't shift and break).
-  make_stat_chip(stats, "58%", "HUMIDITY", COLOR_PRIMARY, &weather_humidity_val, 110, &lv_font_montserrat_22, LV_FLEX_ALIGN_CENTER, 62);
-  make_stat_chip(stats, "12 km/h", "WIND", COLOR_PRIMARY, &weather_wind_val, 110, &lv_font_montserrat_22, LV_FLEX_ALIGN_CENTER, 62);
-  make_stat_chip(stats, "4", "UV INDEX", COLOR_PRIMARY, &weather_uv_val, 110, &lv_font_montserrat_22, LV_FLEX_ALIGN_CENTER, 62);
+  make_stat_chip(stats, "58%", tr(S_HUMIDITY), COLOR_PRIMARY, &weather_humidity_val, 110, &lv_font_ui_22, LV_FLEX_ALIGN_CENTER, 62);
+  make_stat_chip(stats, "12 km/h", tr(S_WIND), COLOR_PRIMARY, &weather_wind_val, 110, &lv_font_ui_22, LV_FLEX_ALIGN_CENTER, 62);
+  make_stat_chip(stats, "4", tr(S_UV), COLOR_PRIMARY, &weather_uv_val, 110, &lv_font_ui_22, LV_FLEX_ALIGN_CENTER, 62);
 
   // Next-event card: the only free space left is the strip below the stats
   // row. A subtle rounded card with a colored accent bar reads better than
@@ -3029,7 +3097,7 @@ lv_obj_t *create_home_screen()
   lv_obj_t *next_event_lab = lv_label_create(next_card);
   lv_label_set_text(next_event_lab, "");
   lv_obj_set_style_text_color(next_event_lab, lv_color_hex(0xE8EDF2), LV_PART_MAIN);
-  lv_obj_set_style_text_font(next_event_lab, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(next_event_lab, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_set_width(next_event_lab, 396);
   lv_obj_set_style_text_align(next_event_lab, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
   lv_label_set_long_mode(next_event_lab, LV_LABEL_LONG_DOT);
@@ -3075,14 +3143,14 @@ lv_obj_t *create_settings_screen()
   lv_obj_t *title = lv_label_create(scr);
   lv_label_set_text(title, "Settings");
   lv_obj_set_style_text_color(title, COLOR_PRIMARY, LV_PART_MAIN);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_28, LV_PART_MAIN);
+  lv_obj_set_style_text_font(title, &lv_font_ui_28, LV_PART_MAIN);
   lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
   // Firmware version, IP and signal - filled by settings_info_update().
   settings_info_lab = lv_label_create(scr);
   lv_label_set_text(settings_info_lab, "v" FW_VERSION);
   lv_obj_set_style_text_color(settings_info_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(settings_info_lab, &lv_font_montserrat_12, LV_PART_MAIN);
+  lv_obj_set_style_text_font(settings_info_lab, &lv_font_ui_12, LV_PART_MAIN);
   lv_obj_set_style_text_align(settings_info_lab, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
   lv_obj_align(settings_info_lab, LV_ALIGN_TOP_RIGHT, 0, 0);
 
@@ -3099,7 +3167,7 @@ lv_obj_t *create_settings_screen()
   lv_obj_t *ap_title = lv_label_create(ap_row);
   lv_label_set_text(ap_title, "Setup Access Point");
   lv_obj_set_style_text_color(ap_title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(ap_title, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_font(ap_title, &lv_font_ui_16, LV_PART_MAIN);
   lv_obj_align(ap_title, LV_ALIGN_TOP_LEFT, 0, 0);
 
   ap_switch = lv_switch_create(ap_row);
@@ -3110,7 +3178,7 @@ lv_obj_t *create_settings_screen()
   ap_status_lab = lv_label_create(ap_row);
   lv_label_set_text(ap_status_lab, "Off");
   lv_obj_set_style_text_color(ap_status_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(ap_status_lab, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(ap_status_lab, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_align(ap_status_lab, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
   // ---- Auto-open Bambu screen when a print starts ----
@@ -3126,7 +3194,7 @@ lv_obj_t *create_settings_screen()
   lv_obj_t *abos_title = lv_label_create(abos_row);
   lv_label_set_text(abos_title, "Show Bambu screen on print start");
   lv_obj_set_style_text_color(abos_title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(abos_title, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(abos_title, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_align(abos_title, LV_ALIGN_TOP_LEFT, 0, 0);
   lv_obj_set_width(abos_title, 340);
 
@@ -3149,7 +3217,7 @@ lv_obj_t *create_settings_screen()
   lv_obj_t *falert_title = lv_label_create(falert_row);
   lv_label_set_text(falert_title, "Show Flight screen on changes (2 min)");
   lv_obj_set_style_text_color(falert_title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(falert_title, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(falert_title, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_align(falert_title, LV_ALIGN_TOP_LEFT, 0, 0);
   lv_obj_set_width(falert_title, 340);
 
@@ -3172,7 +3240,7 @@ lv_obj_t *create_settings_screen()
   lv_obj_t *wifi_title = lv_label_create(wifi_row);
   lv_label_set_text(wifi_title, "Auto-hide Wi-Fi icon (Home, 20 s)");
   lv_obj_set_style_text_color(wifi_title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(wifi_title, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(wifi_title, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_align(wifi_title, LV_ALIGN_TOP_LEFT, 0, 0);
   lv_obj_set_width(wifi_title, 340);
 
@@ -3195,7 +3263,7 @@ lv_obj_t *create_settings_screen()
   lv_obj_t *idle_title = lv_label_create(idle_row);
   lv_label_set_text(idle_title, "Return to Home after");
   lv_obj_set_style_text_color(idle_title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(idle_title, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(idle_title, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_align(idle_title, LV_ALIGN_TOP_LEFT, 0, 0);
 
   idle_timeout_dd = lv_dropdown_create(idle_row);
@@ -3621,7 +3689,11 @@ void setup()
     disp_drv.ver_res = screenHeight;
     disp_drv.flush_cb = my_disp_flush;
     disp_drv.draw_buf = &draw_buf;
-    lv_disp_drv_register(&disp_drv);
+    lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+    // Same default theme LVGL sets up itself, but with lv_font_ui_14 (the
+    // built-in Montserrat plus accented letters) for text without its own font.
+    lv_disp_set_theme(disp, lv_theme_default_init(disp, lv_palette_main(LV_PALETTE_BLUE), lv_palette_main(LV_PALETTE_RED),
+                                                  LV_THEME_DEFAULT_DARK, &lv_font_ui_14));
 
     static lv_indev_drv_t indev_drv;
     lv_indev_drv_init(&indev_drv);
@@ -3643,6 +3715,7 @@ void setup()
     cal_day_screen = create_calendar_day_screen();
     create_forecast_screen();
     create_agenda_screen();
+    create_print_history_screen();
 
     for (int i = 0; i < SCREEN_COUNT; i++) {
       lv_obj_add_event_cb(screens[i], screen_gesture_cb, LV_EVENT_GESTURE, NULL);
@@ -3655,6 +3728,7 @@ void setup()
     create_nav_menu();
     create_wifi_signal_indicator();
     create_update_ui();
+    create_quick_panel();
     create_screensaver();
     create_alert_banner(); // last: above everything else on the top layer
     create_blackout_overlay();
@@ -3702,7 +3776,7 @@ void update_icon_refresh()
 
 void update_icon_clicked_cb(lv_event_t *e)
 {
-  lv_label_set_text_fmt(update_dialog_text, "Firmware v%s is available.\nYou have v" FW_VERSION ".", gh_latest);
+  lv_label_set_text_fmt(update_dialog_text, tr(S_UPDATE_TEXT), gh_latest, FW_VERSION);
   lv_obj_clear_flag(update_dialog, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -3771,19 +3845,19 @@ void create_update_ui()
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t *title = lv_label_create(card);
-  lv_label_set_text(title, "Update available");
+  lv_label_set_text(title, tr(S_UPDATE_AVAIL));
   lv_obj_set_style_text_color(title, COLOR_SUCCESS, LV_PART_MAIN);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_22, LV_PART_MAIN);
+  lv_obj_set_style_text_font(title, &lv_font_ui_22, LV_PART_MAIN);
   lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
   update_dialog_text = lv_label_create(card);
   lv_label_set_text(update_dialog_text, "");
   lv_obj_set_style_text_color(update_dialog_text, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(update_dialog_text, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_font(update_dialog_text, &lv_font_ui_16, LV_PART_MAIN);
   lv_obj_align(update_dialog_text, LV_ALIGN_TOP_LEFT, 0, 36);
 
-  update_dialog_btn(card, "Skip", lv_color_hex(0x34424F), 2, LV_ALIGN_BOTTOM_LEFT);
-  update_dialog_btn(card, "Install", COLOR_SUCCESS, 1, LV_ALIGN_BOTTOM_RIGHT);
+  update_dialog_btn(card, tr(S_SKIP), lv_color_hex(0x34424F), 2, LV_ALIGN_BOTTOM_LEFT);
+  update_dialog_btn(card, tr(S_INSTALL), COLOR_SUCCESS, 1, LV_ALIGN_BOTTOM_RIGHT);
 }
 
 // "Updating firmware NN%" card over everything while an upload runs.
@@ -3794,7 +3868,7 @@ void ota_apply_to_ui()
   if (!card)
   {
     card = lv_obj_create(lv_disp_get_layer_top(NULL));
-    lv_obj_set_size(card, 320, 110);
+    lv_obj_set_size(card, 420, LV_SIZE_CONTENT);
     lv_obj_center(card);
     lv_obj_set_style_bg_color(card, lv_color_hex(0x10181F), LV_PART_MAIN);
     lv_obj_set_style_border_color(card, COLOR_PRIMARY, LV_PART_MAIN);
@@ -3803,11 +3877,13 @@ void ota_apply_to_ui()
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     lab = lv_label_create(card);
     lv_obj_set_style_text_color(lab, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(lab, &lv_font_montserrat_22, LV_PART_MAIN);
+    lv_obj_set_style_text_font(lab, &lv_font_ui_18, LV_PART_MAIN);
     lv_obj_set_style_text_align(lab, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_width(lab, 380);
+    lv_label_set_long_mode(lab, LV_LABEL_LONG_WRAP);
     lv_obj_center(lab);
   }
-  lv_label_set_text_fmt(lab, "Updating firmware\n%u%%", (unsigned)ota_percent);
+  lv_label_set_text_fmt(lab, "%s\n%s", tr(S_UPDATING), tr(S_UPDATING_DARK));
   // While flash is being written the panel can't always read its picture
   // from PSRAM and smears shifted copies of it - so everything goes black
   // (nothing to smear) except this small card.
