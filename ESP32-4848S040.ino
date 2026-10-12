@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.16"
+#define FW_VERSION "3.17"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -3673,12 +3673,22 @@ static uint32_t last_clock_sync_ms = 0;
 // mbedTLS allocates from internal RAM only in this core's build
 // (CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC): the always-on Bambu MQTT/TLS link
 // plus each HTTPS fetch left too little for the next handshake ("Couldn't
-// reach GitHub", HTTP -1) and probably starved lwIP too. Its buffers go
-// to PSRAM instead, internal RAM only as a fallback.
+// reach GitHub", HTTP -1) and probably starved lwIP too. But TLS buffers in
+// PSRAM compete with the RGB panel for PSRAM bandwidth (the printer's
+// encrypted report arrives every second), which knocked the picture out of
+// alignment for good. So: internal RAM while there's room to spare, PSRAM
+// only when internal RAM runs short.
+#define TLS_INTERNAL_SPARE (24 * 1024) // keep at least this much contiguous internal RAM free
+
 static void *tls_calloc(size_t n, size_t size)
 {
-  void *p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  return p ? p : heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t total = n * size;
+  void *p = NULL;
+  if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) > total + TLS_INTERNAL_SPARE)
+    p = heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!p) p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!p) p = heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  return p;
 }
 
 void tls_memory_to_psram()
