@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.13"
+#define FW_VERSION "3.14"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -1748,6 +1748,27 @@ String build_settings_page()
   if (settings.shot_open) page += F(" checked");
   page += F(
       "> Allow screenshots without login</label>"
+      "<label>Page</label><select id='shotpage'><option value=''>What's on screen now</option>");
+  {
+    // Same list as SHOT_PAGES (defined further down, with handle_screenshot()).
+    static const char *const PAGES[][2] = {
+        {"home", "Home"}, {"bambu", "Bambu printer"}, {"calendar", "Calendar"}, {"calday", "Calendar - today"},
+        {"agenda", "Agenda"}, {"forecast", "Forecast"}, {"proxmox", "Proxmox"}, {"stocks", "Stocks"},
+        {"makerworld", "MakerWorld"}, {"packages", "Packages"}, {"flight", "Flight"}, {"homeassistant", "Home Assistant"},
+        {"history", "Print history"}, {"settings", "Settings screen"}, {"quick", "Quick panel"}, {"night", "Night clock"}};
+    for (auto &pg : PAGES)
+    {
+      page += "<option value='";
+      page += pg[0];
+      page += "'>";
+      page += pg[1];
+      page += "</option>";
+    }
+  }
+  page += F(
+      "</select>"
+      "<button type='button' style='margin-top:8px' onclick=\"var p=document.getElementById('shotpage').value;"
+      "window.open('/screenshot'+(p?'?page='+p:''),'_blank')\">Take screenshot</button>"
       "<label style='margin-top:2px;font-size:11px'><i>http://dashboard.local/screenshot</i> returns what the "
       "screen shows (add <i>?page=forecast</i>, <i>home</i>, <i>bambu</i>, <i>calendar</i>, <i>agenda</i>, "
       "<i>quick</i>, <i>night</i>, ... to switch first). Off: it needs the setup login. Turn it on only while "

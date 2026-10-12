@@ -186,6 +186,8 @@ Saving restarts the device.
 curl -o forecast.bmp "http://dashboard.local/screenshot?page=forecast"
 ```
 
+On the setup page, the **Screenshots** section has the same list: pick a page and press **Take screenshot** to open it in a new tab.
+
 It needs the setup login, unless **Allow screenshots without login** is on (setup page). Turn that on only while you need it: anyone on your Wi-Fi could see the screen.
 
 ## Messages from Home Assistant
