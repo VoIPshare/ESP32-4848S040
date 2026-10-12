@@ -312,7 +312,14 @@ void update_home_bambu_badge()
   {
     if (home_bambu_badge_lab)
     {
-      lv_label_set_text(home_bambu_badge_lab, "PRINTING");
+      // Progress and time left, e.g. "PRINTING 42% - 1h 05m".
+      if (strcmp(bambu.gcode_state, "RUNNING") == 0 && bambu.remain_time_min > 0)
+        lv_label_set_text_fmt(home_bambu_badge_lab, "PRINTING %d%%  -  %dh %02dm", bambu.percent,
+                              bambu.remain_time_min / 60, bambu.remain_time_min % 60);
+      else if (strcmp(bambu.gcode_state, "RUNNING") == 0)
+        lv_label_set_text_fmt(home_bambu_badge_lab, "PRINTING %d%%", bambu.percent);
+      else
+        lv_label_set_text(home_bambu_badge_lab, "PREPARING");
       lv_obj_set_style_text_color(home_bambu_badge_lab, lv_color_hex(0x2B1600), LV_PART_MAIN);
     }
     if (home_bambu_badge)
@@ -374,6 +381,8 @@ void bambu_apply_to_ui()
   bool was_printing_ish = strcmp(bambu_prev_gcode_state, "RUNNING") == 0 ||
                            strcmp(bambu_prev_gcode_state, "PREPARE") == 0 ||
                            strcmp(bambu_prev_gcode_state, "PAUSE") == 0;
+  if (strcmp(bambu.gcode_state, "FAILED") == 0 && was_printing_ish)
+    alert_show(LV_SYMBOL_WARNING "  Print failed", lv_color_hex(0xC62828));
   if (strcmp(bambu.gcode_state, "FINISH") == 0 && was_printing_ish)
   {
     bambu_finish_badge_until_ms = millis() + BAMBU_FINISH_BADGE_MS;

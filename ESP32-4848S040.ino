@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.6"
+#define FW_VERSION "3.7"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -25,6 +25,7 @@
 #include <WiFiClientSecure.h>
 #include <Update.h>
 #include "bootloader_random.h"
+#include "nvs.h"
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <esp32s3/rom/cache.h> // Cache_WriteBack_Addr() - see my_disp_flush()
@@ -63,7 +64,9 @@ extern const lv_font_t lv_font_roboto_bold_136;
 // Home screen shortcut icons (Material Design Icons) - see home_icons.c /
 // tools/make_home_icons.py.
 extern const lv_img_dsc_t home_icon_home, home_icon_printer, home_icon_calendar, home_icon_server, home_icon_stocks,
-    home_icon_makerworld, home_icon_package, home_icon_flight, home_icon_pin;
+    home_icon_makerworld, home_icon_package, home_icon_flight, home_icon_pin, home_icon_ha,
+    wx_icon_sunny, wx_icon_night, wx_icon_partly, wx_icon_cloudy, wx_icon_fog, wx_icon_rain, wx_icon_pouring,
+    wx_icon_snow, wx_icon_storm;
 }
 
 #define GFX_BL 38
@@ -139,9 +142,11 @@ static lv_disp_drv_t disp_drv;
 #define COLOR_CLOUD lv_color_hex(0xECEFF1)
 
 // Screens: Home, Bambu printer, Calendar, Proxmox, Stocks, MakerWorld,
-// Packages, Flight. The Flight screen is only in the swipe sequence while
-// a flight is coming up - see screen_available()/flight.ino.
-#define SCREEN_COUNT 8
+// Packages, Flight, Home Assistant. Flight is only in the swipe sequence
+// while a flight is coming up, Home Assistant only once it's set up - see
+// screen_available().
+#define SCREEN_COUNT 9
+#define HA_SCREEN_INDEX 8
 #define FLIGHT_SCREEN_INDEX 7
 static lv_obj_t *screens[SCREEN_COUNT];
 static uint8_t current_screen = 0;
@@ -188,7 +193,9 @@ static lv_obj_t *weather_uv_val = NULL;
 static lv_obj_t *page_dots_row = NULL;
 static uint32_t last_activity_ms = 0;
 static bool in_settings = false;
-static bool in_calendar_day = false; // true while the Calendar day-detail screen is showing (see calendar.ino)
+// Detail pages outside screens[] (Calendar day, Forecast, Agenda) - see
+// open_subscreen(). current_screen keeps the page they were opened from.
+static bool in_subscreen = false;
 
 // Auto-return-to-Home after N min idle (see clock_tick_cb()) - N is
 // settings.idle_return_home_min, set on the on-device Settings screen (see
@@ -352,6 +359,10 @@ struct DeviceSettings
   char makerworld_uid[24] = ""; // numeric MakerWorld user ID
   char pkge_api_key[96] = "";   // PKGE Business API key (package tracking)
   char aerodatabox_key[96] = ""; // RapidAPI key for AeroDataBox (live flight status, optional)
+  // Home Assistant (homeassistant.ino): address, long-lived token, entity IDs.
+  char ha_url[96] = "";
+  char ha_token[300] = "";
+  char ha_entities[400] = ""; // "light.desk, switch.fan, sensor.outdoor_temperature"
   uint8_t idle_return_home_min = 5; // one of IDLE_TIMEOUT_OPTIONS_MIN - see create_settings_screen()
   bool flight_alert = true; // show the Flight screen for 2 min when the flight's data changes
   bool wifi_icon_autohide = true; // Wi-Fi icon only on Home, for 20 s - see wifi_indicator_update_visibility()
@@ -363,6 +374,7 @@ struct DeviceSettings
   uint8_t night_end = 7;
   uint8_t night_level = 10;
   uint8_t day_level = 100; // normal brightness, %
+  bool night_clock = true;  // dimmed at night: big clock instead of the dashboard (screensaver.ino)
   // GitHub release updates (see gh_update_maintain()): UPDATE_NOTIFY shows
   // an icon on Home to accept/skip, UPDATE_AUTO installs by itself,
   // UPDATE_OFF never checks on its own (the Settings button still works).
@@ -416,6 +428,7 @@ void clock_tick_cb(lv_timer_t *timer)
 
   wifi_indicator_update_visibility();
   backlight_update();
+  alert_tick();
 
   // Auto-hide the page-position dots after 10 s of no touch activity (a
   // touch brings them back - see my_touchpad_read()).
@@ -435,15 +448,14 @@ void clock_tick_cb(lv_timer_t *timer)
   // Auto-return to Home after settings.idle_return_home_min of no touch -
   // except while the Bambu screen is showing because a print just
   // auto-opened it (that case is handled by the finish-triggered return
-  // below instead), never while pinned, and never while viewing the
-  // Calendar day-detail screen (its own back button is the only exit).
+  // below instead) and never while pinned. Detail pages close too.
   // Jump menu left open: close it after 10 s.
   if (nav_menu_until_ms != 0 && millis() >= nav_menu_until_ms) nav_menu_hide();
 
   // Flight change alert over: back to whatever was showing before.
   if (flight_alert_until_ms != 0 && millis() >= flight_alert_until_ms) flight_alert_end(false);
 
-  if (!screen_pinned && !in_settings && !in_calendar_day && current_screen != 0 && flight_alert_until_ms == 0)
+  if (!screen_pinned && !in_settings && (current_screen != 0 || in_subscreen) && flight_alert_until_ms == 0)
   {
     bool bambu_auto_exempt = (current_screen == 1 && bambu_screen_auto_opened);
     uint32_t idle_return_home_ms = (uint32_t)settings.idle_return_home_min * 60UL * 1000UL;
@@ -451,6 +463,11 @@ void clock_tick_cb(lv_timer_t *timer)
     {
       bambu_screen_auto_opened = false;
       bambu_auto_return_home_at_ms = 0;
+      if (in_subscreen)
+      {
+        in_subscreen = false;
+        if (page_dots_row) lv_obj_clear_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
+      }
       go_to_screen_blackout(0);
     }
   }
@@ -523,15 +540,17 @@ void backlight_update()
   bool dim = night_now() && millis() - last_activity_ms > NIGHT_DIM_IDLE_MS;
   uint8_t want = dim ? settings.night_level : settings.day_level;
   if (want != backlight_level) backlight_set(want);
+  screensaver_update();
 }
 
 /* Touchpad read */
 void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
 {
   ts.read();
-  if (ts.isTouched && (touch_swallow || backlight_level == 0))
+  if (ts.isTouched && (touch_swallow || backlight_level == 0 || screensaver_visible()))
   {
-    // Screen was off: this touch only wakes it - nothing underneath gets pressed.
+    // Screen off or night clock showing: this touch only wakes the
+    // dashboard - nothing underneath gets pressed.
     touch_swallow = true;
     last_activity_ms = millis();
     backlight_update();
@@ -543,7 +562,7 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
   {
     last_activity_ms = millis();
     if (backlight_level != settings.day_level) backlight_update();
-    if (page_dots_row && !in_settings && !in_calendar_day) lv_obj_clear_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
+    if (page_dots_row && !in_settings && !in_subscreen) lv_obj_clear_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
 
     lv_coord_t bx = map(ts.points[0].x, TOUCH_MAP_X1, TOUCH_MAP_X2, 0, gfx->width() - 1);
     lv_coord_t by = map(ts.points[0].y, TOUCH_MAP_Y1, TOUCH_MAP_Y2, 0, gfx->height() - 1);
@@ -575,6 +594,7 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
 bool screen_available(uint8_t idx)
 {
   if (idx == FLIGHT_SCREEN_INDEX) return flight_screen_active();
+  if (idx == HA_SCREEN_INDEX) return ha_configured();
   return idx < SCREEN_COUNT;
 }
 
@@ -647,7 +667,7 @@ void go_to_screen_blackout(uint8_t target)
 // like a left swipe. The top-right corner only opens Settings (5s hold).
 void corner_tap_next_screen_cb(lv_event_t *e)
 {
-  if (screen_pinned || in_settings || in_calendar_day) return;
+  if (screen_pinned || in_settings || in_subscreen) return;
   nav_menu_hide();
   flight_alert_cancel();
   bambu_screen_auto_opened = false;
@@ -713,7 +733,7 @@ void nav_menu_hotspot_cb(lv_event_t *e)
   if (pin_hold_event(e)) return;
   if (lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED) return;
   if (in_settings) return;
-  if (in_calendar_day) { close_calendar_day_screen(NULL); return; }
+  if (in_subscreen) { close_subscreen(NULL); return; }
   if (screen_pinned || settings.home_shortcuts == SHORTCUTS_OFF) return;
   if (nav_menu_until_ms) nav_menu_hide();
   else nav_menu_show();
@@ -756,7 +776,8 @@ lv_obj_t *make_shortcut_btn(lv_obj_t *parent, const lv_img_dsc_t *icon, lv_color
 struct ShortcutDef { const lv_img_dsc_t *icon; uint8_t screen; };
 static const ShortcutDef SHORTCUTS[] = {
     {&home_icon_home, 0}, {&home_icon_printer, 1}, {&home_icon_calendar, 2}, {&home_icon_server, 3},
-    {&home_icon_stocks, 4}, {&home_icon_makerworld, 5}, {&home_icon_package, 6}, {&home_icon_flight, FLIGHT_SCREEN_INDEX}};
+    {&home_icon_stocks, 4}, {&home_icon_makerworld, 5}, {&home_icon_package, 6}, {&home_icon_flight, FLIGHT_SCREEN_INDEX},
+    {&home_icon_ha, HA_SCREEN_INDEX}};
 #define SHORTCUT_COUNT (sizeof(SHORTCUTS) / sizeof(SHORTCUTS[0]))
 
 // Jump menu on the always-on-top layer: an invisible top-left hotspot, a
@@ -872,7 +893,7 @@ void prev_hotspot_cb(lv_event_t *e)
 
 void corner_tap_prev_screen()
 {
-  if (screen_pinned || in_settings || in_calendar_day) return;
+  if (screen_pinned || in_settings || in_subscreen) return;
   nav_menu_hide();
   flight_alert_cancel();
   bambu_screen_auto_opened = false;
@@ -1084,6 +1105,9 @@ const char *wmo_weather_desc(int code)
 // must never touch LVGL directly (not thread-safe), so it only writes here
 // and flags weather_needs_ui_refresh; weather_apply_to_ui() (called from
 // loop(), the LVGL-owning thread) does the actual label/icon updates.
+#define WEATHER_HOURS 12 // forecast page: every hour, shown every 2nd
+#define WEATHER_DAYS 6   // today + 5
+
 struct WeatherData
 {
   float temp = 0;
@@ -1095,6 +1119,11 @@ struct WeatherData
   float feels = 0;
   float tmax = 0, tmin = 0;
   bool has_daily = false;
+  // Forecast page (forecast.ino): the next hours and the next days.
+  int hourly_count = 0;
+  struct { uint8_t hour; float temp; int wcode; uint8_t pop; bool is_day; } hourly[WEATHER_HOURS];
+  int daily_count = 0;
+  struct { uint8_t wday; float tmax, tmin; int wcode; uint8_t pop; } daily[WEATHER_DAYS];
 };
 static WeatherData weather_data;
 static volatile bool weather_needs_ui_refresh = false;
@@ -1118,6 +1147,7 @@ void weather_apply_to_ui()
   if (weather_humidity_val) lv_label_set_text_fmt(weather_humidity_val, "%d%%", weather_data.humidity);
   if (weather_wind_val) lv_label_set_text_fmt(weather_wind_val, "%.0f km/h", weather_data.wind);
   if (weather_uv_val) lv_label_set_text_fmt(weather_uv_val, "%.0f", weather_data.uv);
+  forecast_apply_to_ui();
 }
 
 // Applies the latest wifi_signal_rssi_dbm/wifi_signal_ui_connected sample
@@ -1162,7 +1192,7 @@ void wifi_indicator_update_visibility()
 {
   if (!wifi_signal_box) return;
   bool show = !settings.wifi_icon_autohide ||
-              (current_screen == 0 && !in_settings &&
+              (current_screen == 0 && !in_settings && !in_subscreen &&
                (!wifi_signal_ui_connected || (wifi_icon_until_ms != 0 && (int32_t)(wifi_icon_until_ms - millis()) > 0)));
   if (show == lv_obj_has_flag(wifi_signal_box, LV_OBJ_FLAG_HIDDEN))
     (show ? lv_obj_clear_flag : lv_obj_add_flag)(wifi_signal_box, LV_OBJ_FLAG_HIDDEN);
@@ -1210,12 +1240,14 @@ void fetch_weather()
   }
   Serial.printf("[Weather] Location \"%s\" (%.4f,%.4f)\n", location, lat, lon);
 
-  char url[360];
+  char url[520];
   snprintf(url, sizeof(url),
            "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
            "&current=temperature_2m,relative_humidity_2m,wind_speed_10m,uv_index,weather_code,is_day,apparent_temperature"
-           "&daily=temperature_2m_max,temperature_2m_min&forecast_days=1&timezone=auto",
-           lat, lon);
+           "&hourly=temperature_2m,weather_code,precipitation_probability,is_day&forecast_hours=%d"
+           "&daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max"
+           "&forecast_days=%d&timezone=auto",
+           lat, lon, WEATHER_HOURS + 1, WEATHER_DAYS);
 
   WiFiClientSecure client;
   client.setInsecure(); // read-only public API, no cert pinning needed
@@ -1265,6 +1297,47 @@ void fetch_weather()
     weather_data.tmax = tmax[0] | 0.0f;
     weather_data.tmin = tmin[0] | 0.0f;
   }
+
+  // Forecast page. Times are local ("2026-10-12T14:00") thanks to timezone=auto.
+  data_lock();
+  JsonObject hourly = doc["hourly"];
+  JsonArray htime = hourly["time"];
+  int nh = 0;
+  for (size_t i = 0; i < htime.size() && nh < WEATHER_HOURS; i++)
+  {
+    const char *t = htime[i] | "";
+    if (strlen(t) < 13) continue;
+    // forecast_hours starts at the current hour: skip it, the page starts at the next one.
+    if (i == 0 && htime.size() > WEATHER_HOURS) continue;
+    weather_data.hourly[nh].hour = (uint8_t)atoi(t + 11);
+    weather_data.hourly[nh].temp = hourly["temperature_2m"][i] | 0.0f;
+    weather_data.hourly[nh].wcode = hourly["weather_code"][i] | 0;
+    weather_data.hourly[nh].pop = hourly["precipitation_probability"][i] | 0;
+    weather_data.hourly[nh].is_day = (hourly["is_day"][i] | 1) != 0;
+    nh++;
+  }
+  weather_data.hourly_count = nh;
+  JsonObject daily = doc["daily"];
+  JsonArray dtime = daily["time"];
+  int nd = 0;
+  for (size_t i = 0; i < dtime.size() && nd < WEATHER_DAYS; i++)
+  {
+    const char *t = dtime[i] | "";
+    struct tm d = {};
+    if (sscanf(t, "%d-%d-%d", &d.tm_year, &d.tm_mon, &d.tm_mday) != 3) continue;
+    d.tm_year -= 1900;
+    d.tm_mon -= 1;
+    d.tm_hour = 12;
+    mktime(&d); // fills tm_wday
+    weather_data.daily[nd].wday = (uint8_t)d.tm_wday;
+    weather_data.daily[nd].tmax = daily["temperature_2m_max"][i] | 0.0f;
+    weather_data.daily[nd].tmin = daily["temperature_2m_min"][i] | 0.0f;
+    weather_data.daily[nd].wcode = daily["weather_code"][i] | 0;
+    weather_data.daily[nd].pop = daily["precipitation_probability_max"][i] | 0;
+    nd++;
+  }
+  weather_data.daily_count = nd;
+  data_unlock();
   weather_needs_ui_refresh = true;
 
   Serial.printf("[Weather] %.1f C, %s\n", weather_data.temp, wmo_weather_desc(weather_data.wcode));
@@ -1306,6 +1379,9 @@ void load_settings()
   prefs.getString("mwuid", settings.makerworld_uid, sizeof(settings.makerworld_uid));
   prefs.getString("pkge", settings.pkge_api_key, sizeof(settings.pkge_api_key));
   prefs.getString("adbkey", settings.aerodatabox_key, sizeof(settings.aerodatabox_key));
+  prefs.getString("haurl", settings.ha_url, sizeof(settings.ha_url));
+  prefs.getString("hatok", settings.ha_token, sizeof(settings.ha_token));
+  prefs.getString("haent", settings.ha_entities, sizeof(settings.ha_entities));
   settings.idle_return_home_min = prefs.getUChar("idlemin", settings.idle_return_home_min);
   settings.flight_alert = prefs.getBool("fltalert", settings.flight_alert);
   settings.wifi_icon_autohide = prefs.getBool("wifihide", settings.wifi_icon_autohide);
@@ -1314,6 +1390,7 @@ void load_settings()
   settings.night_end = prefs.getUChar("nend", settings.night_end);
   settings.night_level = prefs.getUChar("nlevel", settings.night_level);
   settings.day_level = prefs.getUChar("dlevel", settings.day_level);
+  settings.night_clock = prefs.getBool("nclock", settings.night_clock);
   settings.update_mode = prefs.getUChar("updmode", settings.update_mode);
   prefs.getString("updskip", settings.update_skip, sizeof(settings.update_skip));
   settings.home_shortcuts = prefs.getUChar("shortcuts", settings.home_shortcuts);
@@ -1342,6 +1419,9 @@ void save_settings()
   prefs.putString("mwuid", settings.makerworld_uid);
   prefs.putString("pkge", settings.pkge_api_key);
   prefs.putString("adbkey", settings.aerodatabox_key);
+  prefs.putString("haurl", settings.ha_url);
+  prefs.putString("hatok", settings.ha_token);
+  prefs.putString("haent", settings.ha_entities);
   prefs.putUChar("idlemin", settings.idle_return_home_min);
   prefs.putBool("fltalert", settings.flight_alert);
   prefs.putBool("wifihide", settings.wifi_icon_autohide);
@@ -1350,6 +1430,7 @@ void save_settings()
   prefs.putUChar("nend", settings.night_end);
   prefs.putUChar("nlevel", settings.night_level);
   prefs.putUChar("dlevel", settings.day_level);
+  prefs.putBool("nclock", settings.night_clock);
   prefs.putUChar("updmode", settings.update_mode);
   prefs.putString("updskip", settings.update_skip);
   prefs.putUChar("shortcuts", settings.home_shortcuts);
@@ -1471,7 +1552,10 @@ String build_settings_page()
   page += String(settings.night_start);
   page += F("'><label>Night until (hour, 0-23)</label><input type='number' min='0' max='23' name='nend' value='");
   page += String(settings.night_end);
-  page += F("'><label>Night brightness (%, 0 = screen off)</label><input type='number' min='0' max='100' name='nlevel' value='");
+  page += F("'><label><input type='checkbox' name='nclock' value='1' style='width:auto'");
+  if (settings.night_clock) page += F(" checked");
+  page += F("> Show a big clock instead of the dashboard while dimmed</label>"
+            "<label>Night brightness (%, 0 = screen off)</label><input type='number' min='0' max='100' name='nlevel' value='");
   page += String(settings.night_level);
   page += F(
       "'>"
@@ -1562,6 +1646,20 @@ String build_settings_page()
       "<label style='margin-top:2px;font-size:11px'>Free key: rapidapi.com -&gt; AeroDataBox -&gt; Basic plan. "
       "On the day of a flight in your calendar, shows delays, gate and departed/landed. Enter - to remove the key.</label>"
       "</fieldset>"
+      "<fieldset><legend>Home Assistant (optional)</legend>"
+      "<label>Address</label><input type='text' name='haurl' placeholder='http://homeassistant.local:8123' value='");
+  page += html_escape(settings.ha_url);
+  page += F("'><label>Long-lived access token</label><input type='password' name='hatok' autocomplete='off' placeholder='");
+  page += settings.ha_token[0] ? F("saved - leave empty to keep") : F("not set");
+  page += F("'><label>Entities (up to 8, comma separated)</label><input type='text' name='haent' "
+            "placeholder='light.desk, switch.fan, sensor.outdoor_temperature' value='");
+  page += html_escape(settings.ha_entities);
+  page += F(
+      "'>"
+      "<label style='margin-top:2px;font-size:11px'>Token: in Home Assistant, your profile -&gt; Security -&gt; "
+      "Long-lived access tokens. Lights, switches, fans, input booleans, automations and scripts toggle with a tap. "
+      "Enter - as token to remove it.</label>"
+      "</fieldset>"
       "<fieldset><legend>Proxmox cluster</legend>"
       "<label>Host (ip:port)</label><input type='text' name='pxhost' placeholder='192.168.1.50:8006' value='");
   page += html_escape(settings.proxmox_host);
@@ -1589,6 +1687,14 @@ String build_settings_page()
       "<input type='file' name='fw' accept='.bin' required>"
       "</fieldset>"
       "<button type='submit'>Upload firmware</button>"
+      "</form>"
+      "<form method='POST' action='/restore' enctype='multipart/form-data'>"
+      "<fieldset><legend>Backup</legend>"
+      "<label><a href='/backup' style='color:#00BCD4'>Download all settings</a> as a file (it includes your "
+      "passwords and keys - keep it private). To restore, pick that file and press Restore; the device restarts.</label>"
+      "<input type='file' name='backup' accept='.json' required>"
+      "</fieldset>"
+      "<button type='submit'>Restore settings</button>"
       "</form>"
       "<script>"
       "var saved='");
@@ -1644,7 +1750,11 @@ void handle_save_post()
   if (config_server.hasArg("ssid")) config_server.arg("ssid").toCharArray(settings.sta_ssid, sizeof(settings.sta_ssid));
   if (config_server.hasArg("pass")) config_server.arg("pass").toCharArray(settings.sta_pass, sizeof(settings.sta_pass));
   if (config_server.hasArg("updmode")) settings.update_mode = (uint8_t)constrain(config_server.arg("updmode").toInt(), 0, 2);
-  if (config_server.hasArg("ndim_form")) settings.night_dim = config_server.hasArg("ndim"); // unchecked boxes aren't sent
+  if (config_server.hasArg("ndim_form")) // unchecked boxes aren't sent
+  {
+    settings.night_dim = config_server.hasArg("ndim");
+    settings.night_clock = config_server.hasArg("nclock");
+  }
   if (config_server.hasArg("nstart")) settings.night_start = (uint8_t)constrain(config_server.arg("nstart").toInt(), 0, 23);
   if (config_server.hasArg("nend")) settings.night_end = (uint8_t)constrain(config_server.arg("nend").toInt(), 0, 23);
   if (config_server.hasArg("nlevel")) settings.night_level = (uint8_t)constrain(config_server.arg("nlevel").toInt(), 0, 100);
@@ -1678,6 +1788,25 @@ void handle_save_post()
     key.trim();
     if (key == "-") settings.aerodatabox_key[0] = '\0';
     else if (key.length() > 0) key.toCharArray(settings.aerodatabox_key, sizeof(settings.aerodatabox_key));
+  }
+  if (config_server.hasArg("haurl"))
+  {
+    String v = config_server.arg("haurl");
+    v.trim();
+    v.toCharArray(settings.ha_url, sizeof(settings.ha_url));
+  }
+  if (config_server.hasArg("hatok"))
+  {
+    String key = config_server.arg("hatok");
+    key.trim();
+    if (key == "-") settings.ha_token[0] = '\0';
+    else if (key.length() > 0) key.toCharArray(settings.ha_token, sizeof(settings.ha_token));
+  }
+  if (config_server.hasArg("haent"))
+  {
+    String v = config_server.arg("haent");
+    v.trim();
+    v.toCharArray(settings.ha_entities, sizeof(settings.ha_entities));
   }
   if (config_server.hasArg("pxhost")) config_server.arg("pxhost").toCharArray(settings.proxmox_host, sizeof(settings.proxmox_host));
   if (config_server.hasArg("pxtok")) config_server.arg("pxtok").toCharArray(settings.proxmox_token_id, sizeof(settings.proxmox_token_id));
@@ -1819,9 +1948,115 @@ void handle_update_done()
   ota_needs_ui_refresh = true;
 }
 
+// ==================== Settings backup / restore ====================
+// The whole "dash" NVS namespace as JSON: {"key": ["type", value], ...}.
+// Generic over whatever keys exist, so new settings are covered without
+// touching this. The AP password stays per device and isn't included.
+void handle_backup()
+{
+  JsonDocument doc;
+  doc["firmware"] = FW_VERSION;
+  JsonObject out = doc["settings"].to<JsonObject>();
+  nvs_handle_t h;
+  if (nvs_open("dash", NVS_READONLY, &h) == ESP_OK)
+  {
+    nvs_iterator_t it = NULL;
+    esp_err_t res = nvs_entry_find("nvs", "dash", NVS_TYPE_ANY, &it);
+    while (res == ESP_OK)
+    {
+      nvs_entry_info_t info;
+      nvs_entry_info(it, &info);
+      if (strcmp(info.key, "appass") != 0)
+      {
+        JsonArray v = out[info.key].to<JsonArray>();
+        switch (info.type)
+        {
+          case NVS_TYPE_U8: { uint8_t x; nvs_get_u8(h, info.key, &x); v.add("u8"); v.add(x); break; }
+          case NVS_TYPE_I8: { int8_t x; nvs_get_i8(h, info.key, &x); v.add("i8"); v.add(x); break; }
+          case NVS_TYPE_U16: { uint16_t x; nvs_get_u16(h, info.key, &x); v.add("u16"); v.add(x); break; }
+          case NVS_TYPE_I16: { int16_t x; nvs_get_i16(h, info.key, &x); v.add("i16"); v.add(x); break; }
+          case NVS_TYPE_U32: { uint32_t x; nvs_get_u32(h, info.key, &x); v.add("u32"); v.add(x); break; }
+          case NVS_TYPE_I32: { int32_t x; nvs_get_i32(h, info.key, &x); v.add("i32"); v.add(x); break; }
+          case NVS_TYPE_STR:
+          {
+            size_t len = 0;
+            nvs_get_str(h, info.key, NULL, &len);
+            char *buf = (char *)malloc(len + 1);
+            if (buf && nvs_get_str(h, info.key, buf, &len) == ESP_OK) { v.add("str"); v.add(buf); }
+            free(buf);
+            break;
+          }
+          default: out.remove(info.key); break; // blobs etc.: not settings
+        }
+      }
+      res = nvs_entry_next(&it);
+    }
+    nvs_release_iterator(it);
+    nvs_close(h);
+  }
+  String json;
+  serializeJsonPretty(doc, json);
+  config_server.sendHeader("Content-Disposition", "attachment; filename=\"dashboard-settings.json\"");
+  config_server.send(200, "application/json", json);
+}
+
+static String restore_body;
+
+void handle_restore_upload()
+{
+  HTTPUpload &up = config_server.upload();
+  if (up.status == UPLOAD_FILE_START) restore_body = "";
+  else if (up.status == UPLOAD_FILE_WRITE && restore_body.length() < 32768) restore_body.concat((const char *)up.buf, up.currentSize);
+}
+
+void handle_restore_done()
+{
+  JsonDocument doc;
+  bool ok = !deserializeJson(doc, restore_body) && doc["settings"].is<JsonObject>();
+  restore_body = "";
+  nvs_handle_t h;
+  int written = 0;
+  if (ok && nvs_open("dash", NVS_READWRITE, &h) == ESP_OK)
+  {
+    for (JsonPair kv : doc["settings"].as<JsonObject>())
+    {
+      const char *key = kv.key().c_str();
+      const char *type = kv.value()[0] | "";
+      JsonVariant v = kv.value()[1];
+      if (strlen(key) > 15 || strcmp(key, "appass") == 0) continue;
+      esp_err_t e = ESP_FAIL;
+      if (!strcmp(type, "str")) e = nvs_set_str(h, key, v | "");
+      else if (!strcmp(type, "u8")) e = nvs_set_u8(h, key, v.as<uint8_t>());
+      else if (!strcmp(type, "i8")) e = nvs_set_i8(h, key, v.as<int8_t>());
+      else if (!strcmp(type, "u16")) e = nvs_set_u16(h, key, v.as<uint16_t>());
+      else if (!strcmp(type, "i16")) e = nvs_set_i16(h, key, v.as<int16_t>());
+      else if (!strcmp(type, "u32")) e = nvs_set_u32(h, key, v.as<uint32_t>());
+      else if (!strcmp(type, "i32")) e = nvs_set_i32(h, key, v.as<int32_t>());
+      if (e == ESP_OK) written++;
+    }
+    nvs_commit(h);
+    nvs_close(h);
+  }
+  ok = ok && written > 0;
+  Serial.printf("[Backup] restore: %d settings\n", written);
+  config_server.send(200, "text/html",
+                     ok ? "<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding-top:60px'>"
+                          "<h2 style='color:#00BCD4'>Restored</h2><p>The device is restarting with those settings.</p></body></html>"
+                        : "<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding-top:60px'>"
+                          "<h2 style='color:#EF5350'>Restore failed</h2><p>That isn't a settings file from this dashboard. "
+                          "Nothing was changed.</p></body></html>");
+  if (ok)
+  {
+    delay(1000);
+    ESP.restart();
+  }
+}
+
 void start_config_server()
 {
   config_server.on("/", handle_root);
+  config_server.on("/backup", HTTP_GET, handle_backup);
+  config_server.on("/restore", HTTP_POST, handle_restore_done, handle_restore_upload);
   config_server.on("/update", HTTP_POST, handle_update_done, handle_update_upload);
   config_server.on("/scan", handle_scan);
   config_server.on("/save", HTTP_POST, handle_save_post);
@@ -2128,11 +2363,19 @@ void settings_info_update()
     case GH_FAILED: snprintf(fw, sizeof(fw), "v" FW_VERSION " - %s", gh_error); break;
     default: snprintf(fw, sizeof(fw), "Firmware v" FW_VERSION); break;
   }
+  // Uptime and free memory, to spot a slow leak.
+  uint32_t up = millis() / 60000UL; // minutes (wraps after 49 days, fine for a glance)
+  char upt[16];
+  if (up >= 1440) snprintf(upt, sizeof(upt), "%lud %luh", (unsigned long)(up / 1440), (unsigned long)(up / 60 % 24));
+  else snprintf(upt, sizeof(upt), "%luh %lum", (unsigned long)(up / 60), (unsigned long)(up % 60));
+  unsigned ram_kb = ESP.getFreeHeap() / 1024;
+  float psram_mb = ESP.getFreePsram() / 1048576.0f;
   if (wifi_signal_ui_connected)
-    lv_label_set_text_fmt(settings_info_lab, "%s\n%s  \xE2\x80\xA2  %d dBm", fw,
-                          WiFi.localIP().toString().c_str(), (int)wifi_signal_rssi_dbm);
+    lv_label_set_text_fmt(settings_info_lab, "%s  \xE2\x80\xA2  up %s\n%s  \xE2\x80\xA2  %d dBm  \xE2\x80\xA2  free %uK + %.1fM",
+                          fw, upt, WiFi.localIP().toString().c_str(), (int)wifi_signal_rssi_dbm, ram_kb, psram_mb);
   else
-    lv_label_set_text_fmt(settings_info_lab, "%s\nWi-Fi not connected", fw);
+    lv_label_set_text_fmt(settings_info_lab, "%s  \xE2\x80\xA2  up %s\nWi-Fi not connected  \xE2\x80\xA2  free %uK + %.1fM",
+                          fw, upt, ram_kb, psram_mb);
 
   if (update_btn_lab)
   {
@@ -2519,12 +2762,12 @@ lv_obj_t *create_home_screen()
   // Shortcut row ("always on Home" mode): one icon per screen, centered
   // between the top-left menu corner (x < 80) and the top-right corner (x > 390).
   lv_obj_t *shortcuts = lv_obj_create(scr);
-  lv_obj_set_size(shortcuts, LV_SIZE_CONTENT, 38);
-  lv_obj_align(shortcuts, LV_ALIGN_TOP_MID, 0, 10); // all 7 icons: x 89-391
+  lv_obj_set_size(shortcuts, LV_SIZE_CONTENT, 36);
+  lv_obj_align(shortcuts, LV_ALIGN_TOP_MID, 0, 11); // all 8 icons (36 px, 4 px apart): x 82-398
   lv_obj_set_style_bg_opa(shortcuts, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(shortcuts, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(shortcuts, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_column(shortcuts, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(shortcuts, 4, LV_PART_MAIN);
   lv_obj_set_flex_flow(shortcuts, LV_FLEX_FLOW_ROW);
   lv_obj_clear_flag(shortcuts, LV_OBJ_FLAG_SCROLLABLE);
   home_shortcuts_row = shortcuts;
@@ -2533,7 +2776,8 @@ lv_obj_t *create_home_screen()
   {
     bool flight = SHORTCUTS[i].screen == FLIGHT_SCREEN_INDEX;
     lv_obj_t *btn = make_shortcut_btn(shortcuts, SHORTCUTS[i].icon, flight ? COLOR_SECONDARY : COLOR_PRIMARY,
-                                      home_shortcut_clicked_cb, SHORTCUTS[i].screen, 38);
+                                      home_shortcut_clicked_cb, SHORTCUTS[i].screen, 36);
+    if (SHORTCUTS[i].screen == HA_SCREEN_INDEX && !ha_configured()) lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
     if (flight)
     {
       home_flight_btn = btn;
@@ -2545,6 +2789,9 @@ lv_obj_t *create_home_screen()
   lv_obj_t *weather_panel = lv_obj_create(scr);
   lv_obj_set_size(weather_panel, 480, 300);
   lv_obj_set_pos(weather_panel, 0, 180);
+  // A tap on the weather opens the Forecast page (forecast.ino).
+  lv_obj_add_flag(weather_panel, LV_OBJ_FLAG_GESTURE_BUBBLE);
+  lv_obj_add_event_cb(weather_panel, home_weather_clicked_cb, LV_EVENT_SHORT_CLICKED, NULL);
   lv_obj_set_style_bg_opa(weather_panel, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(weather_panel, 0, LV_PART_MAIN);
   lv_obj_set_style_radius(weather_panel, 0, LV_PART_MAIN);
@@ -2661,7 +2908,25 @@ lv_obj_t *create_home_screen()
   lv_obj_align(next_event_lab, LV_ALIGN_LEFT_MID, 26, 0);
   home_next_event_lab = next_event_lab;
 
+  // Taps: the "Next" card opens the Agenda (calendar.ino), everything else
+  // in the weather panel - except the badges - opens the Forecast.
+  for (uint32_t i = 0; i < lv_obj_get_child_cnt(weather_panel); i++)
+  {
+    lv_obj_t *child = lv_obj_get_child(weather_panel, i);
+    if (child != home_bambu_badge && child != home_proxmox_badge && child != next_card) make_click_through(child);
+  }
+  make_click_through(next_accent);
+  lv_obj_add_flag(next_card, LV_OBJ_FLAG_GESTURE_BUBBLE);
+  lv_obj_add_event_cb(next_card, home_next_clicked_cb, LV_EVENT_SHORT_CLICKED, NULL);
+
   return scr;
+}
+
+// Lets taps on obj (and everything in it) fall through to its parent.
+void make_click_through(lv_obj_t *obj)
+{
+  lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+  for (uint32_t i = 0; i < lv_obj_get_child_cnt(obj); i++) make_click_through(lv_obj_get_child(obj, i));
 }
 
 // Screen 1 (Bambu printer) moved to bambu.ino.
@@ -2999,6 +3264,42 @@ void create_blackout_overlay()
 // start_finish_screen_flash(), bambu_warning_cycle_cb(),
 // bambu_badge_flash_cb(), and start_bambu_badge_flash() moved to bambu.ino.
 
+// Shows a detail page (not part of the swipe sequence). Its back button -
+// and the top-left corner - call close_subscreen(), which returns to
+// current_screen, the page it was opened from.
+void open_subscreen(lv_obj_t *scr)
+{
+  in_subscreen = true;
+  nav_menu_hide();
+  if (page_dots_row) lv_obj_add_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
+  lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
+  wifi_indicator_update_visibility();
+}
+
+void close_subscreen(lv_event_t *e)
+{
+  if (!in_subscreen) return;
+  in_subscreen = false;
+  if (page_dots_row) lv_obj_clear_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
+  switch_screen(current_screen, LV_SCR_LOAD_ANIM_NONE);
+}
+
+// Back button for a detail page, top-left (where the corner tap also goes back).
+lv_obj_t *make_back_button(lv_obj_t *scr)
+{
+  lv_obj_t *back_btn = lv_btn_create(scr);
+  lv_obj_set_size(back_btn, 60, 50);
+  lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 12, 12);
+  lv_obj_set_style_bg_color(back_btn, COLOR_BG_LIGHT, LV_PART_MAIN);
+  lv_obj_set_style_radius(back_btn, 12, LV_PART_MAIN);
+  lv_obj_add_event_cb(back_btn, close_subscreen, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *back_lab = lv_label_create(back_btn);
+  lv_label_set_text(back_lab, LV_SYMBOL_LEFT);
+  lv_obj_set_style_text_color(back_lab, COLOR_PRIMARY, LV_PART_MAIN);
+  lv_obj_center(back_lab);
+  return back_btn;
+}
+
 void switch_screen(uint8_t num, lv_scr_load_anim_t anim)
 {
   if (num >= SCREEN_COUNT) return;
@@ -3074,6 +3375,7 @@ void network_task(void *param)
     }
     bambu_mqtt_maintain();
     if (wifi_connected && clock_synced_once) gh_update_maintain();
+    if (wifi_connected) ha_maintain();
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
@@ -3160,9 +3462,12 @@ void setup()
     screens[4] = create_stocks_screen();
     screens[5] = create_makerworld_screen();
     screens[6] = create_tracking_screen();
+    screens[HA_SCREEN_INDEX] = create_ha_screen();
     screens[FLIGHT_SCREEN_INDEX] = create_flight_screen();
     settings_screen = create_settings_screen();
     cal_day_screen = create_calendar_day_screen();
+    create_forecast_screen();
+    create_agenda_screen();
 
     for (int i = 0; i < SCREEN_COUNT; i++) {
       lv_obj_add_event_cb(screens[i], screen_gesture_cb, LV_EVENT_GESTURE, NULL);
@@ -3175,6 +3480,8 @@ void setup()
     create_nav_menu();
     create_wifi_signal_indicator();
     create_update_ui();
+    create_screensaver();
+    create_alert_banner(); // last: above everything else on the top layer
     create_blackout_overlay();
     create_finish_flash_overlay();
     last_activity_ms = millis();
@@ -3211,7 +3518,7 @@ bool update_offer_pending()
 void update_icon_refresh()
 {
   if (!update_icon) return;
-  bool show = update_offer_pending() && current_screen == 0 && !in_settings;
+  bool show = update_offer_pending() && current_screen == 0 && !in_settings && !in_subscreen;
   if (show == lv_obj_has_flag(update_icon, LV_OBJ_FLAG_HIDDEN))
     (show ? lv_obj_clear_flag : lv_obj_add_flag)(update_icon, LV_OBJ_FLAG_HIDDEN);
   if (update_dialog && !update_offer_pending()) lv_obj_add_flag(update_dialog, LV_OBJ_FLAG_HIDDEN);
@@ -3345,6 +3652,7 @@ void loop()
   if (proxmox_needs_ui_refresh) { proxmox_needs_ui_refresh = false; proxmox_apply_to_ui(); }
   if (wifi_signal_needs_ui_refresh) { wifi_signal_needs_ui_refresh = false; wifi_signal_apply_to_ui(); }
   if (ota_needs_ui_refresh) { ota_needs_ui_refresh = false; ota_apply_to_ui(); }
+  if (ha_take_ui_refresh()) ha_apply_to_ui();
   if (gh_needs_ui_refresh) { gh_needs_ui_refresh = false; settings_info_update(); update_icon_refresh(); }
 
   delay(5);

@@ -300,13 +300,6 @@ static lv_obj_t *cal_day_row[CALENDAR_MAX_EVENTS_PER_DAY] = {NULL};
 static lv_obj_t *cal_day_row_time[CALENDAR_MAX_EVENTS_PER_DAY] = {NULL};
 static lv_obj_t *cal_day_row_title[CALENDAR_MAX_EVENTS_PER_DAY] = {NULL};
 
-void close_calendar_day_screen(lv_event_t *e)
-{
-  in_calendar_day = false;
-  if (page_dots_row) lv_obj_clear_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
-  switch_screen(2, LV_SCR_LOAD_ANIM_NONE); // screens[2] = Calendar - see setup()
-}
-
 void open_calendar_day_screen(int day)
 {
   int ty = clock_year, tmon = clock_mon + 1;
@@ -348,9 +341,7 @@ void open_calendar_day_screen(int day)
   }
   data_unlock();
 
-  in_calendar_day = true;
-  if (page_dots_row) lv_obj_add_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
-  lv_scr_load_anim(cal_day_screen, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
+  open_subscreen(cal_day_screen);
 }
 
 // user_data is &cal_cell_day[i] (not the day value itself) so this stays
@@ -375,17 +366,7 @@ lv_obj_t *create_calendar_day_screen()
   // above every screen's content - see create_settings_hotspot()/
   // create_pin_hotspot()). A button placed under either would never
   // receive the tap.
-  lv_obj_t *back_btn = lv_btn_create(scr);
-  lv_obj_set_size(back_btn, 60, 50);
-  lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 12, 12);
-  lv_obj_set_style_bg_color(back_btn, COLOR_BG_LIGHT, LV_PART_MAIN);
-  lv_obj_set_style_radius(back_btn, 12, LV_PART_MAIN);
-  lv_obj_add_event_cb(back_btn, close_calendar_day_screen, LV_EVENT_CLICKED, NULL);
-
-  lv_obj_t *back_lab = lv_label_create(back_btn);
-  lv_label_set_text(back_lab, LV_SYMBOL_LEFT);
-  lv_obj_set_style_text_color(back_lab, COLOR_PRIMARY, LV_PART_MAIN);
-  lv_obj_center(back_lab);
+  make_back_button(scr);
 
   cal_day_title_lab = lv_label_create(scr);
   lv_obj_set_style_text_color(cal_day_title_lab, COLOR_PRIMARY, LV_PART_MAIN);
@@ -514,5 +495,139 @@ lv_obj_t *create_calendar_screen()
 
   calendar_apply_to_ui();
 
+  return scr;
+}
+
+// ==================== Agenda page ====================
+// Today's and tomorrow's events as one list - opened by tapping the "Next"
+// card on Home. Today comes from the month data (so finished events show
+// too, dimmed); tomorrow from the month data or, when tomorrow is already
+// next month, from the upcoming list.
+static lv_obj_t *agenda_screen = NULL;
+static lv_obj_t *agenda_list = NULL;
+
+static void agenda_header(const char *text)
+{
+  lv_obj_t *lab = lv_label_create(agenda_list);
+  lv_label_set_text(lab, text);
+  lv_obj_set_style_text_color(lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
+  lv_obj_set_style_text_font(lab, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_letter_space(lab, 1, LV_PART_MAIN);
+  lv_obj_set_style_pad_top(lab, 6, LV_PART_MAIN);
+}
+
+static void agenda_row(const char *when, const char *title, bool past)
+{
+  lv_obj_t *row = lv_obj_create(agenda_list);
+  lv_obj_set_size(row, 440, 44);
+  lv_obj_set_style_bg_color(row, COLOR_BG_LIGHT, LV_PART_MAIN);
+  lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(row, 12, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(row, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE); // drags scroll the list
+
+  lv_obj_t *t = lv_label_create(row);
+  lv_label_set_text(t, when);
+  lv_obj_set_style_text_color(t, past ? COLOR_TEXT_MUTED : COLOR_PRIMARY, LV_PART_MAIN);
+  lv_obj_set_style_text_font(t, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_align(t, LV_ALIGN_LEFT_MID, 14, 0);
+
+  lv_obj_t *n = lv_label_create(row);
+  lv_label_set_text(n, title[0] ? title : "(untitled event)");
+  lv_obj_set_style_text_color(n, past ? COLOR_TEXT_MUTED : lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_set_style_text_font(n, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_width(n, 330);
+  lv_label_set_long_mode(n, LV_LABEL_LONG_DOT);
+  lv_obj_align(n, LV_ALIGN_LEFT_MID, 96, 0);
+}
+
+static void agenda_add_day(int which /* 0 today, 1 tomorrow */, time_t now)
+{
+  struct tm d;
+  time_t t = now + which * 86400;
+  localtime_r(&t, &d);
+  char hdr[48];
+  snprintf(hdr, sizeof(hdr), "%s  -  %s %d", which ? "TOMORROW" : "TODAY", MONTH_NAMES[d.tm_mon % 12], d.tm_mday);
+  agenda_header(hdr);
+
+  int shown = 0;
+  bool same_month = calendar_data_is_current() && d.tm_mon == clock_mon && d.tm_year + 1900 == clock_year;
+  if (same_month)
+  {
+    for (int i = 0; i < calendar->day_count[d.tm_mday] && i < CALENDAR_MAX_EVENTS_PER_DAY; i++)
+    {
+      CalendarEvent &ev = calendar->days[d.tm_mday][i];
+      agenda_row(ev.all_day ? "All day" : ev.time, ev.title, which == 0 && !ev.all_day && ev.start < now);
+      shown++;
+    }
+  }
+  else if (calendar && calendar_have_data)
+  {
+    for (int i = 0; i < calendar->upcoming_count; i++)
+    {
+      UpcomingEvent &ev = calendar->upcoming[i];
+      struct tm s;
+      localtime_r(&ev.start, &s);
+      if (s.tm_yday != d.tm_yday || s.tm_year != d.tm_year) continue;
+      char when[8];
+      strftime(when, sizeof(when), "%H:%M", &s);
+      agenda_row(ev.all_day ? "All day" : when, ev.title, false);
+      shown++;
+    }
+  }
+  if (!shown) agenda_row("", calendar_has_feeds() ? "Nothing scheduled" : "No calendar configured", true);
+}
+
+void open_agenda_screen()
+{
+  if (!agenda_screen || screen_pinned) return;
+  lv_obj_clean(agenda_list);
+  time_t now = time(nullptr);
+  data_lock();
+  if (now > 1700000000)
+  {
+    agenda_add_day(0, now);
+    agenda_add_day(1, now);
+  }
+  else agenda_header("Waiting for the clock to sync...");
+  data_unlock();
+  lv_obj_scroll_to_y(agenda_list, 0, LV_ANIM_OFF);
+  open_subscreen(agenda_screen);
+}
+
+void home_next_clicked_cb(lv_event_t *e)
+{
+  open_agenda_screen();
+}
+
+lv_obj_t *create_agenda_screen()
+{
+  lv_obj_t *scr = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(scr, COLOR_BG, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(scr, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+  agenda_screen = scr;
+
+  make_back_button(scr);
+
+  lv_obj_t *title = lv_label_create(scr);
+  lv_label_set_text(title, "Agenda");
+  lv_obj_set_style_text_color(title, COLOR_PRIMARY, LV_PART_MAIN);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_28, LV_PART_MAIN);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 22);
+
+  // Scrolls vertically when there are many events.
+  agenda_list = lv_obj_create(scr);
+  lv_obj_set_size(agenda_list, 456, 396);
+  lv_obj_align(agenda_list, LV_ALIGN_TOP_MID, 0, 76);
+  lv_obj_set_style_bg_opa(agenda_list, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(agenda_list, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(agenda_list, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_left(agenda_list, 8, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(agenda_list, 6, LV_PART_MAIN);
+  lv_obj_set_flex_flow(agenda_list, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_scroll_dir(agenda_list, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(agenda_list, LV_SCROLLBAR_MODE_OFF);
   return scr;
 }

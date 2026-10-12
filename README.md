@@ -7,17 +7,25 @@ A dashboard application for the 480×480 4-inch ESP32-4848S040 display (ESP32-S3
 | Screen | Data source | Needs | Refresh |
 | --- | --- | --- | --- |
 | Home: clock, weather, next event | NTP, [Open-Meteo](https://open-meteo.com/), your iCal feeds | city or coordinates | weather every 10 min |
+| Forecast (tap the weather) | Open-Meteo: next 12 hours and 5 days | - | with the weather |
+| Agenda (tap the "Next" card) | your iCal feeds: today and tomorrow | iCal URL | with the calendar |
 | Bambu Lab printer | the printer, over local MQTT | printer IP, serial, access code | live |
 | Calendar (month + day detail) | up to 3 iCal (`.ics`) feeds, merged, recurrence included | iCal URL | every 30 min |
 | Proxmox cluster | Proxmox VE API | host + API token | every 20 s |
 | Stocks (up to 7) | Yahoo Finance | ticker symbols | every 10 min |
 | MakerWorld stats | Bambu's MakerWorld API | MakerWorld user ID | every hour |
 | Packages (up to 5) | [PKGE](https://business.pkge.net) | PKGE API key | every 2 hours |
+| Home Assistant (up to 8 entities, tap to toggle) | [Home Assistant](https://www.home-assistant.io/) REST API | address, long-lived token, entity IDs | every 10 s while showing, 5 min otherwise |
 | Flight on the Home strip (optional live status) | calendar titles, [AeroDataBox](https://rapid.aerodatabox.com) via RapidAPI | RapidAPI key (optional) | every 30 min on the day, 10 min around departure/landing |
 
 Flights in your calendar (titles like `AC871 YUL->YYZ`, `TS399 PUJ->YUL` or anything containing "flight") are pinned on the Home strip from 24 hours before departure, with a countdown. With an AeroDataBox key the strip also shows delays, gate, "In the air" and "Landed".
 
-Also: dark theme with color-coded status (green/yellow/red), night dimming on a schedule you choose, and firmware updates from GitHub releases straight from the device (or by uploading a file in the browser).
+Also:
+- **Alerts**: a blinking banner across the top for a delivered package, a Proxmox node going offline or a failed print. It lights the screen up (not at night) and goes away after a minute or on a tap.
+- **Night**: dimming on a schedule you choose, with a big dim clock instead of the dashboard (or the screen off).
+- **Updates**: firmware updates from GitHub releases straight from the device, or by uploading a file in the browser.
+- **Backup**: download all settings as a file and restore them later.
+- Dark theme with color-coded status (green/yellow/red); while printing, Home shows the progress and time left.
 
 ## Hardware Requirements
 
@@ -105,14 +113,16 @@ If you'd rather stay on LVGL 9.5+, you'll need to update the sketch's display-in
 - **Pinned** (a red pin icon top-left): the screen stays put. Swipes, corner taps, the jump menu, automatic returns to Home and automatic screen changes (print start, flight changes) are all paused until you hold the top-left corner again.
 - **Update available** (a green download icon on Home, right edge): tap it to install the new release or skip that version. See [Firmware updates](#firmware-updates).
 - The Wi-Fi icon (top-right) shows only on Home, for 20 seconds after you get there or after the connection changes, and stays while Wi-Fi is down. Turn **Auto-hide Wi-Fi icon** off in Settings to always show it on every screen.
-- The jump menu closes after 10 seconds or on a tap outside it. On the Calendar day view the top-left corner is its back button.
+- On Home, tap the weather for the **Forecast** and the "Next" card for the **Agenda**. Detail pages (these two and the Calendar day view) have a back button top-left, and the top-left corner works as back too.
+- The jump menu closes after 10 seconds or on a tap outside it.
+- At night (if dimming is on) the first touch only wakes the screen.
 - With "Always on Home" (setup page), the icons also stay on Home, right of the menu corner.
 
 ## Screens
 
 Use the corners or swipe left/right to move between them (see [Navigation](#navigation)):
 
-1. **Home**: clock, date, current weather (icon, temperature, humidity, wind, UV) and the next calendar event or flight
+1. **Home**: clock, date, current weather (icon, temperature, humidity, wind, UV) and the next calendar event or flight; a print in progress shows its percentage and time left. Tap the weather for the Forecast, the "Next" card for the Agenda
 2. **Bambu Lab printer**: status, progress, temperatures, layers, AMS trays, fans and HMS warnings
 3. **Calendar**: the current month with event days marked; tap a day for its events
 4. **Proxmox cluster**: up to 3 nodes with status, CPU, RAM, disk and uptime
@@ -120,10 +130,11 @@ Use the corners or swipe left/right to move between them (see [Navigation](#navi
 6. **MakerWorld**: likes, downloads, prints, collections and boosts with today's growth, designs/followers/level, and the 3 most downloaded designs
 7. **Packages**: up to 5 PKGE parcels with status and estimated delivery
 8. **Flight**: only while a calendar flight is coming up or in progress
+9. **Home Assistant**: only once it's set up; up to 8 entities as tiles, lit when on. Lights, switches, fans, input booleans, automations and scripts toggle with a tap
 
 ## Settings screen
 
-Hold the top-right corner for 5 seconds. Top right shows the firmware version, update status, IP address and Wi-Fi signal.
+Hold the top-right corner for 5 seconds. Top right shows the firmware version and update status, uptime, IP address, Wi-Fi signal and free memory (RAM + PSRAM).
 
 | Control | What it does |
 | --- | --- |
@@ -146,7 +157,7 @@ In Settings turn on **Setup Access Point**, then join the Wi-Fi network `ESP32-D
 | **Time zone** | Your zone; summer/winter time is automatic. |
 | **Weather location** | A city, optionally with a 2-letter country code (`London, GB`), or `latitude,longitude`. Empty uses the city of the time zone. A city is looked up once with Open-Meteo's geocoding. |
 | **Home screen: shortcut icons** | Top-left corner menu (default), always on Home as well, or off. See [Navigation](#navigation). |
-| **Display brightness** | Normal brightness, and night dimming: on/off, from/until hour (it may wrap past midnight, e.g. 23 to 7) and night brightness (0 turns the screen off). At night the screen dims after 30 seconds without a touch; a touch brings it back. |
+| **Display brightness** | Normal brightness, and night dimming: on/off, from/until hour (it may wrap past midnight, e.g. 23 to 7), the big night clock on/off, and night brightness (0 turns the screen off). At night the screen dims after 30 seconds without a touch; a touch brings it back. |
 | **Firmware updates from GitHub** | Show an icon and let me choose (default), install automatically, or don't check. |
 | **Bambu printer** | Printer name (shown on screen), IP address, port (8883), serial number and LAN access code, from the printer's network settings. |
 | **Stocks** | Up to 7 Yahoo Finance symbols, comma separated: `AAPL,NVDA,^IXIC`. |
@@ -154,8 +165,10 @@ In Settings turn on **Setup Access Point**, then join the Wi-Fi network `ESP32-D
 | **MakerWorld user ID** | The number in your profile's `/design-service/published/<number>/design` address. |
 | **PKGE API key** | From business.pkge.net → Company profile → API key. Add tracking numbers in the PKGE dashboard. Empty keeps the saved key, `-` removes it. |
 | **AeroDataBox API key** | Optional. Free key: rapidapi.com → AeroDataBox → Basic plan. Empty keeps the saved key, `-` removes it. |
+| **Home Assistant** | Address (`http://homeassistant.local:8123`), a long-lived access token (your HA profile → Security), and up to 8 entity IDs, comma separated: `light.desk, switch.fan, sensor.outdoor_temperature`. Empty token keeps the saved one, `-` removes it. |
 | **Proxmox cluster** | Host as `ip:port` (8006), API token ID (`user@realm!name`) and secret. A read-only PVEAuditor token is enough. |
 | **Firmware update** | Upload a `.ino.bin` file to update from the browser. |
+| **Backup** | *Download all settings* saves them as a JSON file (with your passwords and keys, so keep it private). Pick that file and press **Restore settings** to load it back, e.g. after a full re-flash or on a second display. |
 
 ## Firmware updates
 
@@ -254,7 +267,9 @@ network_task (core 0)                         loop() (core 1, LVGL)
 ```
 ESP32-4848S040/
 ├── ESP32-4848S040.ino          ← Main sketch (upload this): display, Home, settings, Wi-Fi portal, network task
-├── bambu.ino / calendar.ino / proxmox.ino / stocks.ino / makerworld.ino / tracking.ino / flight.ino  ← one tab per screen
+├── bambu.ino / calendar.ino / proxmox.ino / stocks.ino / makerworld.ino / tracking.ino / flight.ino / homeassistant.ino  ← one tab per screen (calendar.ino also has the Agenda)
+├── forecast.ino                 ← Forecast page
+├── alerts.ino / screensaver.ino ← alert banner, night clock
 ├── web_fetch.ino                ← schedules the direct fetches and copies results into the screens
 ├── direct_fetch.cpp/.h          ← Open-Meteo geocoding, Yahoo, iCal parser, MakerWorld, PKGE, AeroDataBox
 ├── gh_update.cpp/.h             ← firmware updates from GitHub releases (pinned root certificates)
@@ -277,6 +292,7 @@ Data sources (all called directly by the ESP32):
 - [PKGE](https://business.pkge.net/) - package tracking (API key)
 - [AeroDataBox on RapidAPI](https://rapidapi.com/aedbx-aedbx/api/aerodatabox) - live flight status (optional API key)
 - [Proxmox VE API](https://pve.proxmox.com/pve-docs/api-viewer/) - cluster status (API token)
+- [Home Assistant REST API](https://developers.home-assistant.io/docs/api/rest/) - entity states and toggles (long-lived token)
 - Bambu Lab printer - local MQTT over TLS in LAN mode ([OpenBambuAPI](https://github.com/Doridian/OpenBambuAPI) documents the messages)
 - NTP (`pool.ntp.org`) - clock
 

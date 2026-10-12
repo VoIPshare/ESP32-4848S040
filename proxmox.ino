@@ -244,6 +244,22 @@ void update_home_proxmox_badge()
   if (!home_proxmox_badge) return;
 
   int offline = proxmox.valid ? proxmox_offline_count() : 0;
+
+  // Alert when a node goes down (not on the first fetch after boot).
+  static int prev_offline = -1;
+  if (proxmox.valid)
+  {
+    if (prev_offline >= 0 && offline > prev_offline)
+    {
+      const char *name = "A node";
+      for (int i = 0; i < PROXMOX_MAX_NODES; i++)
+        if (proxmox.nodes[i].valid && strcmp(proxmox.nodes[i].status, "online") != 0) { name = proxmox.nodes[i].name; break; }
+      char msg[64];
+      snprintf(msg, sizeof(msg), LV_SYMBOL_WARNING "  Proxmox: %s offline", name);
+      alert_show(msg, lv_color_hex(0xC62828));
+    }
+    prev_offline = offline;
+  }
   if (offline == 0)
   {
     lv_obj_add_flag(home_proxmox_badge, LV_OBJ_FLAG_HIDDEN);

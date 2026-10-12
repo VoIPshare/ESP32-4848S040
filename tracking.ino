@@ -104,7 +104,38 @@ void tracking_apply_to_ui()
     lv_obj_set_style_bg_color(tracking_pill[i], tracking_status_color(t.status), LV_PART_MAIN);
   }
 
+  tracking_check_delivered();
   data_unlock();
+}
+
+// Alert when a parcel we already knew about turns "delivered". The first
+// good fetch after boot only records the statuses.
+void tracking_check_delivered()
+{
+  static char prev_num[TRACKING_MAX][40];
+  static int prev_status[TRACKING_MAX];
+  static int prev_count = -1;
+  if (!tracking_fetch_attempted || !tracking_fetch_ok) return;
+
+  for (int i = 0; i < tracking_count && prev_count >= 0; i++)
+  {
+    if (tracking[i].status != 5) continue;
+    for (int j = 0; j < prev_count; j++)
+    {
+      if (strcmp(prev_num[j], tracking[i].track_number) != 0 || prev_status[j] == 5) continue;
+      size_t len = strlen(tracking[i].track_number);
+      char msg[64];
+      snprintf(msg, sizeof(msg), LV_SYMBOL_OK "  Package delivered: ...%s",
+               len > 8 ? tracking[i].track_number + len - 8 : tracking[i].track_number);
+      alert_show(msg, lv_color_hex(0x2E7D32));
+    }
+  }
+  for (int i = 0; i < tracking_count; i++)
+  {
+    strlcpy(prev_num[i], tracking[i].track_number, sizeof(prev_num[i]));
+    prev_status[i] = tracking[i].status;
+  }
+  prev_count = tracking_count;
 }
 
 // ==================== Screen 7: Packages ====================

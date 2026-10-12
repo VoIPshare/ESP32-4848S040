@@ -20,6 +20,17 @@ ICONS = [  # (C name, MDI name, codepoint)
     ("home_icon_package", "package-variant-closed", 0xF03D7),
     ("home_icon_flight", "airplane", 0xF001D),
     ("home_icon_pin", "pin", 0xF0403),  # "screen pinned" indicator, top-left
+    ("home_icon_ha", "home-assistant", 0xF07D0),
+    # Forecast page (forecast.ino)
+    ("wx_icon_sunny", "weather-sunny", 0xF0599),
+    ("wx_icon_night", "weather-night", 0xF0594),
+    ("wx_icon_partly", "weather-partly-cloudy", 0xF0595),
+    ("wx_icon_cloudy", "weather-cloudy", 0xF0590),
+    ("wx_icon_fog", "weather-fog", 0xF0591),
+    ("wx_icon_rain", "weather-rainy", 0xF0597),
+    ("wx_icon_pouring", "weather-pouring", 0xF0596),
+    ("wx_icon_snow", "weather-snowy", 0xF0598),
+    ("wx_icon_storm", "weather-lightning", 0xF0593),
 ]
 
 font = ImageFont.truetype(sys.argv[1], SIZE)
