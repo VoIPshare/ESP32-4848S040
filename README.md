@@ -174,8 +174,19 @@ Saving restarts the device.
 | **AeroDataBox API key** | Optional. Free key: rapidapi.com → AeroDataBox → Basic plan. Empty keeps the saved key, `-` removes it. |
 | **Home Assistant** | Address (`http://homeassistant.local:8123`), a long-lived access token (your HA profile → Security), and up to 8 entity IDs, comma separated: `light.desk, switch.fan, sensor.outdoor_temperature`. Empty token keeps the saved one, `-` removes it. |
 | **Proxmox cluster** | Host as `ip:port` (8006), API token ID (`user@realm!name`) and secret. A read-only PVEAuditor token is enough. |
+| **Screenshots** | *Allow screenshots without login* (off by default). See [Screenshots](#screenshots). |
 | **Firmware update** | Upload a `.ino.bin` file to update from the browser. |
 | **Backup** | *Download all settings* saves them as a JSON file (with your passwords and keys, so keep it private). Pick that file and press **Restore settings** to load it back, e.g. after a full re-flash or on a second display. |
+
+## Screenshots
+
+`http://dashboard.local/screenshot` returns what the screen shows as a 480×480 BMP image. Add `?page=` to switch first: `home`, `bambu`, `calendar`, `proxmox`, `stocks`, `makerworld`, `packages`, `flight`, `homeassistant`, `forecast`, `agenda`, `history`, `calday`, `settings`, `quick` (quick panel), `night` (night clock, until the next touch).
+
+```bash
+curl -o forecast.bmp "http://dashboard.local/screenshot?page=forecast"
+```
+
+It needs the setup login, unless **Allow screenshots without login** is on (setup page). Turn that on only while you need it: anyone on your Wi-Fi could see the screen.
 
 ## Messages from Home Assistant
 

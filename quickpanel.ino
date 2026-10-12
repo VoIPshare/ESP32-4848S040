@@ -40,17 +40,19 @@ void quick_panel_request()
 }
 
 // Every second from clock_tick_cb().
+void quick_panel_open()
+{
+  qp_open_pending = false;
+  nav_menu_hide();
+  qp_refresh();
+  lv_obj_clear_flag(qp_backdrop, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(qp_backdrop);
+  qp_until_ms = millis() + QP_SHOW_MS;
+}
+
 void quick_panel_tick()
 {
-  if (qp_open_pending)
-  {
-    qp_open_pending = false;
-    nav_menu_hide();
-    qp_refresh();
-    lv_obj_clear_flag(qp_backdrop, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(qp_backdrop);
-    qp_until_ms = millis() + QP_SHOW_MS;
-  }
+  if (qp_open_pending) quick_panel_open();
   else if (qp_until_ms && (int32_t)(qp_until_ms - millis()) <= 0) quick_panel_hide();
 }
 

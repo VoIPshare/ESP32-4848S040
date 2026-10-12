@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.11"
+#define FW_VERSION "3.12"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -407,6 +407,7 @@ struct DeviceSettings
   // UPDATE_OFF never checks on its own (the Settings button still works).
   uint8_t update_mode = UPDATE_NOTIFY;
   uint8_t lang = LANG_EN; // LANG_EN / LANG_IT / LANG_FR - see lang.h
+  bool shot_open = false; // /screenshot without the login - see handle_screenshot()
   char update_skip[16] = ""; // version the user chose to skip
   uint8_t home_shortcuts = SHORTCUTS_ON_TAP; // SHORTCUTS_ALWAYS (icons on Home) / _ON_TAP (top-left menu) / _OFF
   // Proxmox VE cluster - see proxmox.ino. host is "ip-or-hostname:port"
@@ -1451,6 +1452,7 @@ void load_settings()
   settings.night_clock = prefs.getBool("nclock", settings.night_clock);
   settings.update_mode = prefs.getUChar("updmode", settings.update_mode);
   settings.lang = prefs.getUChar("lang", settings.lang);
+  settings.shot_open = prefs.getBool("shotopen", settings.shot_open);
   ui_lang = settings.lang < LANG_COUNT ? settings.lang : LANG_EN;
   prefs.getString("updskip", settings.update_skip, sizeof(settings.update_skip));
   settings.home_shortcuts = prefs.getUChar("shortcuts", settings.home_shortcuts);
@@ -1493,6 +1495,7 @@ void save_settings()
   prefs.putBool("nclock", settings.night_clock);
   prefs.putUChar("updmode", settings.update_mode);
   prefs.putUChar("lang", settings.lang);
+  prefs.putBool("shotopen", settings.shot_open);
   prefs.putString("updskip", settings.update_skip);
   prefs.putUChar("shortcuts", settings.home_shortcuts);
   prefs.putString("pxhost", settings.proxmox_host);
@@ -1739,6 +1742,17 @@ String build_settings_page()
       "Long-lived access tokens. Lights, switches, fans, input booleans, automations and scripts toggle with a tap. "
       "Enter - as token to remove it.</label>"
       "</fieldset>"
+      "<fieldset><legend>Screenshots</legend>"
+      "<input type='hidden' name='shot_form' value='1'>"
+      "<label><input type='checkbox' name='shotopen' value='1' style='width:auto'");
+  if (settings.shot_open) page += F(" checked");
+  page += F(
+      "> Allow screenshots without login</label>"
+      "<label style='margin-top:2px;font-size:11px'><i>http://dashboard.local/screenshot</i> returns what the "
+      "screen shows (add <i>?page=forecast</i>, <i>home</i>, <i>bambu</i>, <i>calendar</i>, <i>agenda</i>, "
+      "<i>quick</i>, <i>night</i>, ... to switch first). Off: it needs the setup login. Turn it on only while "
+      "you need it - anyone on your Wi-Fi could then see the screen.</label>"
+      "</fieldset>"
       "<fieldset><legend>Proxmox cluster</legend>"
       "<label>Host (ip:port)</label><input type='text' name='pxhost' placeholder='192.168.1.50:8006' value='");
   page += html_escape(settings.proxmox_host);
@@ -1832,6 +1846,7 @@ void handle_save_post()
   if (config_server.hasArg("mqtt_pass")) config_server.arg("mqtt_pass").toCharArray(settings.mqtt_pass, sizeof(settings.mqtt_pass));
   if (config_server.hasArg("ssid")) config_server.arg("ssid").toCharArray(settings.sta_ssid, sizeof(settings.sta_ssid));
   if (config_server.hasArg("pass")) config_server.arg("pass").toCharArray(settings.sta_pass, sizeof(settings.sta_pass));
+  if (config_server.hasArg("shot_form")) settings.shot_open = config_server.hasArg("shotopen");
   if (config_server.hasArg("lang")) settings.lang = (uint8_t)constrain(config_server.arg("lang").toInt(), 0, LANG_COUNT - 1);
   if (config_server.hasArg("updmode")) settings.update_mode = (uint8_t)constrain(config_server.arg("updmode").toInt(), 0, 2);
   if (config_server.hasArg("ndim_form")) // unchecked boxes aren't sent
@@ -2185,6 +2200,7 @@ void start_config_server()
   config_server.on("/scan", handle_scan);
   config_server.on("/save", HTTP_POST, handle_save_post);
   config_server.on("/notify", HTTP_POST, handle_notify);
+  config_server.on("/screenshot", HTTP_GET, handle_screenshot);
   // Catch-all: iOS/Android/Windows each probe a different well-known URL
   // (e.g. captive.apple.com/hotspot-detect.html, connectivitycheck.gstatic.com)
   // right after joining a Wi-Fi network. Serving our page for *any* unmatched
@@ -2240,6 +2256,102 @@ void notify_apply_to_ui()
   uint16_t secs = notify_seconds;
   data_unlock();
   alert_show(text, lv_color_hex(rgb), secs * 1000UL);
+}
+
+// ==================== Screenshots ====================
+// GET /screenshot[?page=...] streams the frame buffer as a 480x480 16-bit
+// BMP. The page switch runs on the LVGL thread (shot_apply_page() from
+// loop()); this handler waits for it and a few frames before capturing.
+static const char *const SHOT_PAGES[] = {"home", "bambu", "calendar", "proxmox", "stocks", "makerworld", "packages",
+                                         "flight", "homeassistant", "forecast", "agenda", "history", "settings",
+                                         "quick", "night", "calday"};
+#define SHOT_PAGE_COUNT (sizeof(SHOT_PAGES) / sizeof(SHOT_PAGES[0]))
+static volatile int shot_page_req = -1; // index into SHOT_PAGES, -1 none
+static volatile uint32_t shot_ready_ms = 0;
+
+// loop() side: puts that page on screen, out of any other overlay first.
+void shot_apply_page(int p)
+{
+  last_activity_ms = millis();
+  dim_forced = false;
+  quick_panel_hide();
+  nav_menu_hide();
+  if (in_settings) close_settings_screen();
+  if (in_subscreen)
+  {
+    in_subscreen = false;
+    if (page_dots_row) lv_obj_clear_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
+  }
+  const char *name = SHOT_PAGES[p];
+  if (p < SCREEN_COUNT) switch_screen(p, LV_SCR_LOAD_ANIM_NONE);
+  else if (!strcmp(name, "forecast")) { switch_screen(0, LV_SCR_LOAD_ANIM_NONE); open_forecast_screen(); }
+  else if (!strcmp(name, "agenda")) { switch_screen(0, LV_SCR_LOAD_ANIM_NONE); open_agenda_screen(); }
+  else if (!strcmp(name, "history")) { switch_screen(1, LV_SCR_LOAD_ANIM_NONE); open_print_history(NULL); }
+  else if (!strcmp(name, "calday")) { switch_screen(2, LV_SCR_LOAD_ANIM_NONE); open_calendar_day_screen(clock_mday); }
+  else if (!strcmp(name, "settings")) open_settings_cb(NULL);
+  else if (!strcmp(name, "quick")) quick_panel_open();
+  else if (!strcmp(name, "night")) { dim_forced = true; dim_forced_at = millis(); }
+  backlight_update();
+}
+
+void handle_screenshot()
+{
+  if (!settings.shot_open && !web_auth()) return;
+  uint16_t *fb = gfx->getFramebuffer();
+  if (!fb)
+  {
+    config_server.send(500, "text/plain", "no frame buffer");
+    return;
+  }
+  if (config_server.hasArg("page"))
+  {
+    String want = config_server.arg("page");
+    int p = -1;
+    for (size_t i = 0; i < SHOT_PAGE_COUNT; i++)
+      if (want.equalsIgnoreCase(SHOT_PAGES[i])) p = i;
+    if (p < 0)
+    {
+      String list;
+      for (size_t i = 0; i < SHOT_PAGE_COUNT; i++) list += String(i ? ", " : "") + SHOT_PAGES[i];
+      config_server.send(400, "text/plain", "unknown page - one of: " + list);
+      return;
+    }
+    shot_ready_ms = 0;
+    shot_page_req = p;
+    // Wait for loop() to switch, then let it draw (and the night clock's 1 s tick).
+    uint32_t t0 = millis();
+    while ((shot_page_req >= 0 || shot_ready_ms == 0) && millis() - t0 < 3000) vTaskDelay(pdMS_TO_TICKS(20));
+    while ((int32_t)(shot_ready_ms - millis()) > 0) vTaskDelay(pdMS_TO_TICKS(20));
+  }
+
+  // BMP: 66-byte header (BITMAPINFOHEADER + RGB565 masks), rows bottom-up.
+  const uint32_t W = screenWidth, H = screenHeight, row = W * 2, img = row * H;
+  uint8_t hdr[66] = {'B', 'M'};
+  auto put32 = [&](int at, uint32_t v) { for (int i = 0; i < 4; i++) hdr[at + i] = (v >> (8 * i)) & 0xFF; };
+  put32(2, 66 + img);  // file size
+  put32(10, 66);       // pixel data offset
+  put32(14, 40);       // info header size
+  put32(18, W);
+  put32(22, H);
+  hdr[26] = 1;         // planes
+  hdr[28] = 16;        // bits per pixel
+  put32(30, 3);        // BI_BITFIELDS
+  put32(34, img);
+  put32(54, 0xF800);   // red mask
+  put32(58, 0x07E0);   // green
+  put32(62, 0x001F);   // blue
+  config_server.setContentLength(66 + img);
+  config_server.send(200, "image/bmp", "");
+  config_server.sendContent((const char *)hdr, sizeof(hdr));
+  static uint16_t buf[480 * 8];
+  for (int32_t y = H - 1; y >= 0;)
+  {
+    // 8 rows at a time, copied out of PSRAM in bottom-up order.
+    int n = 0;
+    for (; n < 8 && y >= 0; n++, y--) memcpy(&buf[n * W], fb + (uint32_t)y * W, row);
+    config_server.sendContent((const char *)buf, n * row);
+    esp_task_wdt_reset();
+  }
 }
 
 // True when the request may go ahead: always from the setup AP, otherwise
@@ -3918,6 +4030,12 @@ void loop()
   if (ota_needs_ui_refresh) { ota_needs_ui_refresh = false; ota_apply_to_ui(); }
   if (ha_take_ui_refresh()) ha_apply_to_ui();
   if (notify_pending) { notify_pending = false; notify_apply_to_ui(); }
+  if (shot_page_req >= 0)
+  {
+    shot_apply_page(shot_page_req);
+    shot_ready_ms = millis() + 1500; // a few frames, and the 1 s clock tick for the night clock / quick panel
+    shot_page_req = -1;
+  }
   if (gh_needs_ui_refresh) { gh_needs_ui_refresh = false; settings_info_update(); update_icon_refresh(); }
 
   delay(5);
