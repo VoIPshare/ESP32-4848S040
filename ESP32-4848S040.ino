@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.14"
+#define FW_VERSION "3.16"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -27,6 +27,7 @@
 #include "bootloader_random.h"
 #include "nvs.h"
 #include "esp_task_wdt.h"
+#include "mbedtls/platform.h"
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
@@ -2364,7 +2365,8 @@ void handle_screenshot()
   config_server.setContentLength(66 + img);
   config_server.send(200, "image/bmp", "");
   config_server.sendContent((const char *)hdr, sizeof(hdr));
-  static uint16_t buf[480 * 8];
+  uint16_t *buf = (uint16_t *)heap_caps_malloc(480 * 8 * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); // only while sending
+  if (!buf) return;
   for (int32_t y = H - 1; y >= 0;)
   {
     // 8 rows at a time, copied out of PSRAM in bottom-up order.
@@ -2373,6 +2375,7 @@ void handle_screenshot()
     config_server.sendContent((const char *)buf, n * row);
     esp_task_wdt_reset();
   }
+  heap_caps_free(buf);
 }
 
 // True when the request may go ahead: always from the setup AP, otherwise
@@ -2698,8 +2701,8 @@ void settings_info_update()
   // Third line only after unplanned restarts (crash, watchdog, power dip).
   char diag[64] = "";
   if (crash_count)
-    snprintf(diag, sizeof(diag), "\n%u unplanned restart%s%s%s", crash_count, crash_count == 1 ? "" : "s",
-             restart_reason[0] ? ", this one after a " : "", restart_reason);
+    snprintf(diag, sizeof(diag), "\n%u unplanned restart%s%s%s - tap to clear", crash_count, crash_count == 1 ? "" : "s",
+             restart_reason[0] ? ", last: " : "", restart_reason);
   if (wifi_signal_ui_connected)
     lv_label_set_text_fmt(settings_info_lab, "%s  \xE2\x80\xA2  up %s\n%s  \xE2\x80\xA2  %d dBm  \xE2\x80\xA2  free %uK + %.1fM%s",
                           fw, upt, WiFi.localIP().toString().c_str(), (int)wifi_signal_rssi_dbm, ram_kb, psram_mb, diag);
@@ -3287,6 +3290,9 @@ lv_obj_t *create_settings_screen()
   lv_obj_set_style_text_font(settings_info_lab, &lv_font_ui_12, LV_PART_MAIN);
   lv_obj_set_style_text_align(settings_info_lab, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
   lv_obj_align(settings_info_lab, LV_ALIGN_TOP_RIGHT, 0, 0);
+  lv_obj_add_flag(settings_info_lab, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_ext_click_area(settings_info_lab, 10);
+  lv_obj_add_event_cb(settings_info_lab, restart_counter_reset_cb, LV_EVENT_CLICKED, NULL);
 
   // ---- Setup Access Point ----
   lv_obj_t *ap_row = lv_obj_create(scr);
@@ -3664,6 +3670,34 @@ static uint32_t last_clock_sync_ms = 0;
 #define WDT_TIMEOUT_S 90 // generous: some fetches block for several seconds
 
 
+// mbedTLS allocates from internal RAM only in this core's build
+// (CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC): the always-on Bambu MQTT/TLS link
+// plus each HTTPS fetch left too little for the next handshake ("Couldn't
+// reach GitHub", HTTP -1) and probably starved lwIP too. Its buffers go
+// to PSRAM instead, internal RAM only as a fallback.
+static void *tls_calloc(size_t n, size_t size)
+{
+  void *p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return p ? p : heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+void tls_memory_to_psram()
+{
+  mbedtls_platform_set_calloc_free(tls_calloc, heap_caps_free);
+}
+
+// Tap on the Settings info text: the unplanned restart count starts over.
+void restart_counter_reset_cb(lv_event_t *e)
+{
+  if (!crash_count) return;
+  crash_count = 0;
+  Preferences p;
+  p.begin("diag", false);
+  p.putUShort("crashes", 0);
+  p.end();
+  settings_info_update();
+}
+
 void restart_reason_init()
 {
   esp_reset_reason_t r = esp_reset_reason();
@@ -3760,6 +3794,7 @@ void setup()
   delay(500);
   Serial.println("\n\n=== Dashboard starting (firmware " FW_VERSION ") ===");
   restart_reason_init();
+  tls_memory_to_psram();
 
   data_mutex = xSemaphoreCreateRecursiveMutex();
 

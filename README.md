@@ -2,6 +2,10 @@
 
 A dashboard application for the 480×480 4-inch ESP32-4848S040 display (ESP32-S3), built with LVGL, featuring up to eight swipeable touch screens. The ESP32 fetches every widget's data itself, directly from each service: no Google Apps Script or other server in between (same approach as the [e-ink dashboard](https://github.com/VoIPshare/ESP32-eInk-Dashboard)).
 
+<p align="center"><img src="images/dashboard.gif" width="360" alt="The dashboard, screen by screen"></p>
+
+More in the [Gallery](#gallery).
+
 ## Features
 
 | Screen | Data source | Needs | Refresh |
@@ -26,6 +30,18 @@ Also:
 - **Updates**: firmware updates from GitHub releases straight from the device, or by uploading a file in the browser.
 - **Backup**: download all settings as a file and restore them later.
 - Dark theme with color-coded status (green/yellow/red); while printing, Home shows the progress and time left.
+
+## Gallery
+
+All taken on the device with the built-in [screenshot](#screenshots) feature.
+
+| | | |
+| :---: | :---: | :---: |
+| <img src="images/screenshots/home.png" width="220" alt="Home"><br>Home | <img src="images/screenshots/forecast.png" width="220" alt="Forecast"><br>Forecast | <img src="images/screenshots/agenda.png" width="220" alt="Agenda"><br>Agenda |
+| <img src="images/screenshots/calendar.png" width="220" alt="Calendar"><br>Calendar | <img src="images/screenshots/bambu.png" width="220" alt="Bambu printer"><br>Bambu printer | <img src="images/screenshots/print-history.png" width="220" alt="Print history"><br>Print history |
+| <img src="images/screenshots/proxmox.png" width="220" alt="Proxmox"><br>Proxmox | <img src="images/screenshots/stocks.png" width="220" alt="Stocks"><br>Stocks | <img src="images/screenshots/makerworld.png" width="220" alt="MakerWorld"><br>MakerWorld |
+| <img src="images/screenshots/packages.png" width="220" alt="Packages"><br>Packages | <img src="images/screenshots/flight.png" width="220" alt="Flight"><br>Flight | <img src="images/screenshots/home-assistant.png" width="220" alt="Home Assistant"><br>Home Assistant |
+| <img src="images/screenshots/quick-panel.png" width="220" alt="Quick panel"><br>Quick panel | <img src="images/screenshots/night-clock.png" width="220" alt="Night clock"><br>Night clock | <img src="images/screenshots/settings.png" width="220" alt="Settings"><br>Settings |
 
 ## Hardware Requirements
 

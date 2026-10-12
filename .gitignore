@@ -1,3 +1,5 @@
 .theia/
 .DS_Store
 build/
+# raw screenshots (unredacted BMPs) - the README uses images/screenshots
+Screenshot/
