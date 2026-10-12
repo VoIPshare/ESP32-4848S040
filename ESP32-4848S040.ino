@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.7"
+#define FW_VERSION "3.8"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -515,6 +515,7 @@ void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color
 // ==================== Backlight / night dimming ====================
 #define BACKLIGHT_PWM_HZ 5000
 #define NIGHT_DIM_IDLE_MS (30UL * 1000UL)
+#define SAVER_MIN_LEVEL 15 // %: the night clock's floor - lower, this panel is practically black
 static uint8_t backlight_level = 100; // %, as last written
 static bool touch_swallow = false;    // a wake-up touch on a dark screen: ignored until released
 
@@ -539,8 +540,9 @@ void backlight_update()
 {
   bool dim = night_now() && millis() - last_activity_ms > NIGHT_DIM_IDLE_MS;
   uint8_t want = dim ? settings.night_level : settings.day_level;
-  if (want != backlight_level) backlight_set(want);
   screensaver_update();
+  if (screensaver_visible() && want < SAVER_MIN_LEVEL) want = SAVER_MIN_LEVEL;
+  if (want != backlight_level) backlight_set(want);
 }
 
 /* Touchpad read */

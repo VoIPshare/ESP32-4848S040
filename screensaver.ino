@@ -2,8 +2,10 @@
 // While the screen is dimmed at night (see backlight_update()) and
 // settings.night_clock is on, a big dim clock on black replaces the
 // dashboard - readable from bed without lighting up the room. It shifts a
-// little every minute. The first touch only wakes the dashboard (it's
-// swallowed in my_touchpad_read(), like a touch on a switched-off screen).
+// little every minute. The backlight never goes below SAVER_MIN_LEVEL while
+// it shows (see backlight_update()). The first touch only wakes the
+// dashboard (it's swallowed in my_touchpad_read(), like a touch on a
+// switched-off screen).
 
 static lv_obj_t *saver = NULL;
 static lv_obj_t *saver_time = NULL;
@@ -25,12 +27,13 @@ void create_screensaver()
   saver_time = lv_label_create(saver);
   lv_label_set_text(saver_time, "");
   lv_obj_set_style_text_font(saver_time, &lv_font_roboto_bold_136, LV_PART_MAIN);
-  lv_obj_set_style_text_color(saver_time, lv_color_hex(0x7A8790), LV_PART_MAIN);
+  // Full-strength colors: the low night backlight already makes it dim.
+  lv_obj_set_style_text_color(saver_time, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
 
   saver_date = lv_label_create(saver);
   lv_label_set_text(saver_date, "");
   lv_obj_set_style_text_font(saver_date, &lv_font_montserrat_22, LV_PART_MAIN);
-  lv_obj_set_style_text_color(saver_date, lv_color_hex(0x4E5A63), LV_PART_MAIN);
+  lv_obj_set_style_text_color(saver_date, lv_color_hex(0xB0BEC5), LV_PART_MAIN);
 }
 
 bool screensaver_visible()
