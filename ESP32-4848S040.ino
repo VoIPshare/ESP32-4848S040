@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.30"
+#define FW_VERSION "3.31"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -66,6 +66,7 @@ enum WeatherIconType { WICON_CLEAR, WICON_PARTLY_CLOUDY, WICON_CLOUDY, WICON_FOG
 // space) for long international numbers. The clocks are Roboto Bold (0-9 :).
 extern "C" {
 extern const lv_font_t lv_font_roboto_medium_90, lv_font_roboto_regular_56;
+extern const lv_font_t lv_font_roboto_medium_44; // 0-9 % h m - space: the Bambu screen's percent and time left
 // UI text: LVGL's built-in Montserrat (same file, same symbols) plus Latin-1
 // accents and typographic quotes, for Italian/French and accented titles.
 // Made with lv_font_conv - see the README.
@@ -3059,10 +3060,7 @@ lv_obj_t *make_stat_chip(lv_obj_t *parent, const char *value, const char *label,
   lv_obj_set_style_pad_all(chip, 0, LV_PART_MAIN);
   lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(chip, LV_FLEX_FLOW_COLUMN);
-  // main_place defaults to CENTER (the original look, used by the weather
-  // chips). The Bambu NOZZLE chip passes END instead, since make_stat_chip2's
-  // two-value chips next to it are taller - bottom-aligning both is what
-  // keeps every chip's caption on the same line across that row.
+  // main_place: CENTER (the default) or END to bottom-align the content.
   lv_obj_set_flex_align(chip, main_place, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
   lv_obj_t *val = lv_label_create(chip);
@@ -3076,55 +3074,6 @@ lv_obj_t *make_stat_chip(lv_obj_t *parent, const char *value, const char *label,
   lv_obj_set_style_text_color(lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
   lv_obj_set_style_text_font(lab, &lv_font_ui_12, LV_PART_MAIN);
   lv_obj_set_style_text_letter_space(lab, 1, LV_PART_MAIN);
-
-  return chip;
-}
-
-// Same chip shell as make_stat_chip() above, but with two stacked value
-// lines instead of one - for chips that pack two related readings into the
-// same slot (e.g. current/total layer, AMS temp/humidity). Pass label=NULL
-// to skip the muted caption line entirely (when the two value lines already
-// carry their own text) rather than sharing one caption below both - three
-// stacked lines plus a caption doesn't fit this chip's 74px height
-// comfortably, so the caller picks whichever fits.
-lv_obj_t *make_stat_chip2(lv_obj_t *parent, const char *line1, const char *line2, const char *label,
-                           lv_color_t value_color, lv_obj_t **line1_out = NULL, lv_obj_t **line2_out = NULL,
-                           lv_coord_t chip_width = 132, const lv_font_t *value_font = &lv_font_ui_16)
-{
-  lv_obj_t *chip = lv_obj_create(parent);
-  lv_obj_set_size(chip, chip_width, 74);
-  lv_obj_set_style_bg_color(chip, COLOR_BG, LV_PART_MAIN);
-  lv_obj_set_style_border_width(chip, 0, LV_PART_MAIN);
-  lv_obj_set_style_radius(chip, 14, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(chip, 0, LV_PART_MAIN);
-  lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_flex_flow(chip, LV_FLEX_FLOW_COLUMN);
-  // Bottom-aligned so this chip's last line lands on the same Y as the
-  // caption in make_stat_chip's single-value chips, even though this one
-  // has an extra value line above it - keeps the row's titles/last lines
-  // flush across chips of different content height.
-  lv_obj_set_flex_align(chip, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-  lv_obj_t *l1 = lv_label_create(chip);
-  lv_label_set_text(l1, line1);
-  lv_obj_set_style_text_color(l1, value_color, LV_PART_MAIN);
-  lv_obj_set_style_text_font(l1, value_font, LV_PART_MAIN);
-  if (line1_out) *line1_out = l1;
-
-  lv_obj_t *l2 = lv_label_create(chip);
-  lv_label_set_text(l2, line2);
-  lv_obj_set_style_text_color(l2, value_color, LV_PART_MAIN);
-  lv_obj_set_style_text_font(l2, value_font, LV_PART_MAIN);
-  if (line2_out) *line2_out = l2;
-
-  if (label)
-  {
-    lv_obj_t *lab = lv_label_create(chip);
-    lv_label_set_text(lab, label);
-    lv_obj_set_style_text_color(lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_text_font(lab, &lv_font_ui_12, LV_PART_MAIN);
-    lv_obj_set_style_text_letter_space(lab, 1, LV_PART_MAIN);
-  }
 
   return chip;
 }
@@ -3504,10 +3453,7 @@ lv_obj_t *create_home_screen()
   lv_obj_clear_flag(stats, LV_OBJ_FLAG_SCROLLABLE);
   home_weather_stats = stats;
 
-  // Slightly smaller than make_stat_chip()'s default 132x74 - just for
-  // this row, via the trailing chip_height param (appended after
-  // main_place rather than inserted earlier, so bambu.ino's fully-
-  // positional NOZZLE chip call doesn't shift and break).
+  // Slightly smaller than make_stat_chip()'s default 132x74.
   make_stat_chip(stats, "58%", tr(S_HUMIDITY), COLOR_PRIMARY, &weather_humidity_val, 110, &lv_font_ui_22, LV_FLEX_ALIGN_CENTER, 62);
   make_stat_chip(stats, "12 km/h", tr(S_WIND), COLOR_PRIMARY, &weather_wind_val, 110, &lv_font_ui_22, LV_FLEX_ALIGN_CENTER, 62);
   make_stat_chip(stats, "4", tr(S_UV), COLOR_PRIMARY, &weather_uv_val, 110, &lv_font_ui_22, LV_FLEX_ALIGN_CENTER, 62);
@@ -4238,7 +4184,6 @@ void setup()
     create_finish_flash_overlay();
     last_activity_ms = millis();
     lv_timer_create(clock_tick_cb, 1000, NULL);
-    lv_timer_create(bambu_fan_spin_cb, 50, NULL);
     lv_timer_create(bambu_warning_cycle_cb, 5000, NULL);
 
     switch_screen(0, LV_SCR_LOAD_ANIM_NONE);

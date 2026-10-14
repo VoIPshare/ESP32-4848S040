@@ -61,6 +61,8 @@ struct BambuStatus
   int big_fan1_speed = -1;    // aux fan
   int big_fan2_speed = -1;    // exhaust fan
   float chamber_temp = 0;
+  float nozzle_target = 0, bed_target = 0;
+  int tray_now = -1; // active AMS tray as ams * 4 + slot; -1 none (254/255 = external / none)
   bool has_warning = false;
   char warning_list[BAMBU_MAX_WARNINGS][64] = {{0}};
   int warning_count = 0;
@@ -77,81 +79,18 @@ static uint32_t bambu_last_attempt_ms = 0;
 // Bambu screen widgets updated live from bambu_apply_to_ui() - populated by
 // create_bambu_screen(). (bambu_pname_lab and bambu_live_product_name are
 // declared in ESP32-4848S040.ino - see the file header comment above.)
-static lv_obj_t *bambu_ams_temp_val = NULL;
-static lv_obj_t *bambu_ams_hum_val = NULL;
+static lv_obj_t *bambu_status_pill = NULL, *bambu_status_pill_lab = NULL;
+static lv_obj_t *bambu_arc = NULL, *bambu_pct_lab = NULL, *bambu_layer_lab = NULL;
 static lv_obj_t *bambu_job_lab = NULL;
-static lv_obj_t *bambu_status_pill = NULL;
-static lv_obj_t *bambu_status_pill_lab = NULL;
-static lv_obj_t *bambu_bar = NULL;
-static lv_obj_t *bambu_prog_lab = NULL;
-static lv_obj_t *bambu_nozzle_val = NULL;
-static lv_obj_t *bambu_bed_val = NULL;    // "55°C" - line1 of the BED/CHAMBER chip
-static lv_obj_t *bambu_chamber_val = NULL; // "35°C" - line2 of the BED/CHAMBER chip
-static lv_obj_t *bambu_layer_cur_val = NULL;
-static lv_obj_t *bambu_layer_tot_val = NULL;
-static lv_obj_t *bambu_slot_bar[BAMBU_MAX_TRAYS] = {NULL, NULL, NULL, NULL};
-static lv_obj_t *bambu_slot_pct_lab[BAMBU_MAX_TRAYS] = {NULL, NULL, NULL, NULL};
-
-// Fan status: [0]=cooling (part), [1]=aux (big_fan1), [2]=exhaust (big_fan2).
-// Each is a hand-drawn 3-blade fan (hub + lv_line blades) "spinning" via a
-// 3-frame swap (bambu_fan_spin_cb, a plain lv_timer show/hide cycle) rather
-// than the transform/layer-compositing style path that broke full-screen
-// objects on this board - a tiny icon's layer buffer would likely be safe
-// too, but this reuses the pattern already proven to work (weather icons,
-// blackout overlay) instead of risking that failure mode again.
-static lv_obj_t *bambu_fan_hub[3] = {NULL, NULL, NULL};
-static lv_obj_t *bambu_fan_blade[3][3] = {{NULL}}; // [fan][frame 0-2]
-static bool bambu_fan_active[3] = {false, false, false};
-static uint8_t bambu_fan_frame[3] = {0, 0, 0}; // per-fan - independent speeds need independent frames
-static uint32_t bambu_fan_period_ms[3] = {200, 200, 200};
-static uint32_t bambu_fan_accum_ms[3] = {0, 0, 0};
-static lv_obj_t *bambu_fan_pct_lab[3] = {NULL, NULL, NULL};
-
-// 6 visual speed tiers (100% gets an extra kick above the 81-99% tier) -
-// costs nothing extra at runtime (the 50ms base timer tick is unchanged
-// either way; this only affects a lookup done once per incoming MQTT update,
-// not per tick).
-uint32_t fan_spin_period_ms(int pct)
-{
-  if (pct <= 20) return 500;
-  if (pct <= 40) return 350;
-  if (pct <= 60) return 250;
-  if (pct <= 80) return 180;
-  if (pct < 100) return 120;
-  return 80;
-}
-
-// 3 rotation frames (0, 40, 80) of a symmetric 3-blade fan - a 3-fold
-// symmetric shape repeats every 120°, so 3 frames 40° apart is enough to
-// simulate a full smooth rotation when cycled. Each frame is one polyline:
-// center -> tip -> center -> tip -> center -> tip -> center (24x24 icon,
-// center at 12,12). Shared across all 3 fan icons - identical geometry.
-static lv_point_t fan_frame_pts[3][7] = {
-    {{12, 12}, {12, 3}, {12, 12}, {20, 17}, {12, 12}, {4, 17}, {12, 12}},
-    {{12, 12}, {18, 5}, {12, 12}, {15, 20}, {12, 12}, {3, 10}, {12, 12}},
-    {{12, 12}, {21, 10}, {12, 12}, {9, 20}, {12, 12}, {6, 5}, {12, 12}},
-};
-
-// Runs on a fixed 50ms base tick (registered in setup()); each fan only
-// actually advances its own blade once its own accumulated time reaches its
-// own bambu_fan_period_ms - that's what lets fans spin at different visual
-// speeds (see bambu_apply_to_ui(), which sets the period from the reported
-// fan %) despite sharing one timer.
-void bambu_fan_spin_cb(lv_timer_t *timer)
-{
-  const uint32_t tick_ms = 50;
-  for (int f = 0; f < 3; f++)
-  {
-    if (!bambu_fan_active[f]) continue;
-    bambu_fan_accum_ms[f] += tick_ms;
-    if (bambu_fan_accum_ms[f] < bambu_fan_period_ms[f]) continue;
-    bambu_fan_accum_ms[f] = 0;
-    uint8_t next = (bambu_fan_frame[f] + 1) % 3;
-    if (bambu_fan_blade[f][bambu_fan_frame[f]]) lv_obj_add_flag(bambu_fan_blade[f][bambu_fan_frame[f]], LV_OBJ_FLAG_HIDDEN);
-    if (bambu_fan_blade[f][next]) lv_obj_clear_flag(bambu_fan_blade[f][next], LV_OBJ_FLAG_HIDDEN);
-    bambu_fan_frame[f] = next;
-  }
-}
+static lv_obj_t *bambu_time_lab = NULL, *bambu_time_sub = NULL, *bambu_state_word = NULL; // "1h 05m" "left" / "Finished"
+static lv_obj_t *bambu_done_row = NULL, *bambu_done_val = NULL, *bambu_start_row = NULL, *bambu_start_val = NULL;
+static lv_obj_t *bambu_temp_val[3] = {NULL, NULL, NULL}; // nozzle, bed, chamber
+static lv_obj_t *bambu_ams_page[BAMBU_MAX_AMS], *bambu_ams_cap[BAMBU_MAX_AMS], *bambu_ams_env[BAMBU_MAX_AMS];
+static lv_obj_t *bambu_tray_tile[BAMBU_MAX_AMS][BAMBU_MAX_TRAYS], *bambu_tray_sw[BAMBU_MAX_AMS][BAMBU_MAX_TRAYS],
+    *bambu_tray_mat[BAMBU_MAX_AMS][BAMBU_MAX_TRAYS], *bambu_tray_rem[BAMBU_MAX_AMS][BAMBU_MAX_TRAYS],
+    *bambu_tray_bar[BAMBU_MAX_AMS][BAMBU_MAX_TRAYS];
+static lv_obj_t *bambu_bottom_lab = NULL; // fans, or the printer's warnings
+static time_t bambu_print_started = 0;   // seen starting since boot; 0 = unknown
 
 const char *bambu_state_label(const char *state)
 {
@@ -413,6 +352,7 @@ void bambu_apply_to_ui()
   // after a reboot, since bambu_prev_gcode_state starts empty either way).
   // Suppressed while screen_pinned, same as every other auto-navigate.
   bool now_printing_ish = strcmp(bambu.gcode_state, "RUNNING") == 0 || strcmp(bambu.gcode_state, "PREPARE") == 0;
+  if (!was_printing_ish && now_printing_ish && bambu.percent < 1) bambu_print_started = time(nullptr);
   if (settings.auto_show_bambu_on_start && !was_printing_ish && now_printing_ish && bambu.percent < 1 &&
       !in_settings && current_screen != 1 && !screen_pinned)
   {
@@ -428,107 +368,137 @@ void bambu_apply_to_ui()
 
   if (bambu_pname_lab)
     lv_label_set_text_fmt(bambu_pname_lab, "%s  " LV_SYMBOL_LIST, bambu_live_product_name[0] ? bambu_live_product_name : settings.printer_name);
-  if (bambu_job_lab)
-  {
-    if (bambu.has_warning)
-    {
-      if (bambu_warning_display_idx >= bambu.warning_count) bambu_warning_display_idx = 0;
-      const char *w = bambu.warning_count > 0 ? bambu.warning_list[bambu_warning_display_idx] : "printer reports an issue";
-      lv_label_set_text_fmt(bambu_job_lab, "WARNING: %s", w[0] ? w : "printer reports an issue");
-      lv_obj_set_style_text_color(bambu_job_lab, COLOR_WARNING, LV_PART_MAIN);
-    }
-    else
-    {
-      lv_label_set_text(bambu_job_lab, bambu.job_name[0] ? bambu.job_name : "No active job");
-      lv_obj_set_style_text_color(bambu_job_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    }
-  }
+  if (!bambu_arc) return;
 
-  bool printing = strcmp(bambu.gcode_state, "RUNNING") == 0 || strcmp(bambu.gcode_state, "PREPARE") == 0;
-  if (bambu_status_pill) lv_obj_set_style_bg_color(bambu_status_pill, printing ? COLOR_SUCCESS : COLOR_TEXT_MUTED, LV_PART_MAIN);
-  if (bambu_status_pill_lab) lv_label_set_text(bambu_status_pill_lab, bambu_state_label(bambu.gcode_state));
+  const char *st = bambu.gcode_state;
+  bool running = !strcmp(st, "RUNNING"), preparing = !strcmp(st, "PREPARE"), paused = !strcmp(st, "PAUSE");
+  bool active = running || preparing || paused;
 
-  if (bambu_bar) lv_bar_set_value(bambu_bar, bambu.percent, LV_ANIM_OFF);
-  if (bambu_prog_lab)
-  {
-    // Chamber temp now has its own home in the BED/CHAMBER chip below (see
-    // bambu_bed_val), so it's no longer repeated here.
-    lv_label_set_text_fmt(bambu_prog_lab, "%d%% complete  -  %dh %dm left",
-                           bambu.percent, bambu.remain_time_min / 60, bambu.remain_time_min % 60);
-  }
-  if (bambu_nozzle_val) lv_label_set_text_fmt(bambu_nozzle_val, "%.0f\xC2\xB0" "C", bambu.nozzle_temp);
-  if (bambu_bed_val) lv_label_set_text_fmt(bambu_bed_val, "%.0f\xC2\xB0" "C", bambu.bed_temp);
-  if (bambu_chamber_val) lv_label_set_text_fmt(bambu_chamber_val, "%.0f\xC2\xB0" "C", bambu.chamber_temp);
-  if (bambu_layer_cur_val) lv_label_set_text_fmt(bambu_layer_cur_val, "%d", bambu.layer_num);
-  if (bambu_layer_tot_val) lv_label_set_text_fmt(bambu_layer_tot_val, "%d", bambu.total_layer_num);
+  // Status pill: orange while printing, green when finished, red on failure.
+  lv_color_t pill = active ? COLOR_SECONDARY : !strcmp(st, "FINISH") ? COLOR_SUCCESS : !strcmp(st, "FAILED") ? lv_color_hex(0xEF5350) : lv_color_hex(0x4A555F);
+  lv_obj_set_style_bg_color(bambu_status_pill, pill, LV_PART_MAIN);
+  lv_obj_set_style_text_color(bambu_status_pill_lab, active ? lv_color_hex(0x2B1600) : lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_label_set_text(bambu_status_pill_lab, bambu_state_label(st));
 
-  int fan_raw[3] = {bambu.cooling_fan_speed, bambu.big_fan1_speed, bambu.big_fan2_speed};
-  for (int i = 0; i < 3; i++)
-  {
-    int pct = fan_percent(fan_raw[i]);
-    bool on = pct > 0;
-    bambu_fan_period_ms[i] = fan_spin_period_ms(pct);
-    if (on != bambu_fan_active[i])
-    {
-      bambu_fan_active[i] = on;
-      // Blades stay visible either way (a fan should still look like a fan
-      // when stopped) - only the color changes; bambu_fan_spin_cb already
-      // only advances the frame for active fans, so an inactive one just
-      // freezes on whichever frame it's currently showing.
-      lv_color_t fan_color = on ? COLOR_PRIMARY : COLOR_TEXT_MUTED;
-      for (int fr = 0; fr < 3; fr++)
-      {
-        if (!bambu_fan_blade[i][fr]) continue;
-        bool show = (fr == bambu_fan_frame[i]);
-        (show ? lv_obj_clear_flag : lv_obj_add_flag)(bambu_fan_blade[i][fr], LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_style_line_color(bambu_fan_blade[i][fr], fan_color, LV_PART_MAIN);
-      }
-      if (bambu_fan_hub[i]) lv_obj_set_style_bg_color(bambu_fan_hub[i], on ? COLOR_PRIMARY : COLOR_TEXT_MUTED, LV_PART_MAIN);
-    }
-    if (bambu_fan_pct_lab[i])
-    {
-      if (pct < 0) lv_label_set_text(bambu_fan_pct_lab[i], "--");
-      else lv_label_set_text_fmt(bambu_fan_pct_lab[i], "%d%%", pct);
-    }
-  }
+  // Ring: percent and layer.
+  int pct = constrain(bambu.percent, 0, 100);
+  lv_arc_set_value(bambu_arc, pct);
+  lv_label_set_text_fmt(bambu_pct_lab, "%d%%", pct);
+  if (bambu.total_layer_num > 0) lv_label_set_text_fmt(bambu_layer_lab, "Layer %d / %d", bambu.layer_num, bambu.total_layer_num);
+  else lv_label_set_text(bambu_layer_lab, "");
 
-  if (bambu.amsCount > 0)
+  lv_label_set_text(bambu_job_lab, bambu.job_name[0] ? bambu.job_name : "No active job");
+
+  // Time left, or the state in words.
+  bool show_time = (running || paused) && bambu.remain_time_min > 0;
+  if (show_time)
   {
-    if (bambu_ams_temp_val) lv_label_set_text_fmt(bambu_ams_temp_val, "%.0f\xC2\xB0" "C", bambu.ams[0].temp);
-    if (bambu_ams_hum_val)
-    {
-      // Filament starts to suffer above ~40% - orange, then red.
-      int h = bambu.ams[0].humidity;
-      lv_label_set_text_fmt(bambu_ams_hum_val, "%d%%", h);
-      lv_obj_set_style_text_color(bambu_ams_hum_val, h >= 50 ? lv_color_hex(0xEF5350) : h >= 40 ? COLOR_SECONDARY : COLOR_PRIMARY, LV_PART_MAIN);
-    }
+    int h = bambu.remain_time_min / 60, m = bambu.remain_time_min % 60;
+    if (h) lv_label_set_text_fmt(bambu_time_lab, "%dh %02dm", h, m);
+    else lv_label_set_text_fmt(bambu_time_lab, "%dm", m);
+    lv_label_set_text(bambu_time_sub, paused ? "left, paused" : "left");
+    lv_obj_align_to(bambu_time_sub, bambu_time_lab, LV_ALIGN_OUT_RIGHT_BOTTOM, 8, -6);
   }
   else
   {
-    if (bambu_ams_temp_val) lv_label_set_text(bambu_ams_temp_val, "--\xC2\xB0" "C");
-    if (bambu_ams_hum_val) lv_label_set_text(bambu_ams_hum_val, "--%");
+    lv_label_set_text(bambu_state_word, preparing ? "Preparing" : paused ? "Paused" : !strcmp(st, "FINISH") ? "Finished"
+                                        : !strcmp(st, "FAILED") ? "Failed" : "Idle");
+  }
+  (show_time ? lv_obj_clear_flag : lv_obj_add_flag)(bambu_time_lab, LV_OBJ_FLAG_HIDDEN);
+  (show_time ? lv_obj_clear_flag : lv_obj_add_flag)(bambu_time_sub, LV_OBJ_FLAG_HIDDEN);
+  (show_time ? lv_obj_add_flag : lv_obj_clear_flag)(bambu_state_word, LV_OBJ_FLAG_HIDDEN);
+
+  // Done at / Started, as clock times (when they're known).
+  time_t now = time(nullptr);
+  struct tm t, today;
+  bool clock_ok = now > 1700000000 && localtime_r(&now, &today);
+  bool done_known = running && bambu.remain_time_min > 0 && clock_ok;
+  if (done_known)
+  {
+    time_t done = now + bambu.remain_time_min * 60;
+    localtime_r(&done, &t);
+    if (t.tm_yday == today.tm_yday) lv_label_set_text_fmt(bambu_done_val, "%02d:%02d", t.tm_hour, t.tm_min);
+    else lv_label_set_text_fmt(bambu_done_val, "tomorrow %02d:%02d", t.tm_hour, t.tm_min);
+  }
+  (done_known ? lv_obj_clear_flag : lv_obj_add_flag)(bambu_done_row, LV_OBJ_FLAG_HIDDEN);
+  bool start_known = active && bambu_print_started > 1700000000 && clock_ok;
+  if (start_known)
+  {
+    localtime_r(&bambu_print_started, &t);
+    lv_label_set_text_fmt(bambu_start_val, "%02d:%02d", t.tm_hour, t.tm_min);
+  }
+  (start_known ? lv_obj_clear_flag : lv_obj_add_flag)(bambu_start_row, LV_OBJ_FLAG_HIDDEN);
+
+  // Temperatures: current, and the target in grey while one is set (orange).
+  float cur[2] = {bambu.nozzle_temp, bambu.bed_temp}, tgt[2] = {bambu.nozzle_target, bambu.bed_target};
+  for (int i = 0; i < 2; i++)
+  {
+    if (tgt[i] > 0) lv_label_set_text_fmt(bambu_temp_val[i], "%.0f\xC2\xB0 #8A97A0 / %.0f#", cur[i], tgt[i]);
+    else lv_label_set_text_fmt(bambu_temp_val[i], "%.0f\xC2\xB0", cur[i]);
+    lv_obj_set_style_text_color(bambu_temp_val[i], tgt[i] > 0 ? COLOR_SECONDARY : lv_color_hex(0xCFD8DC), LV_PART_MAIN);
+  }
+  lv_label_set_text_fmt(bambu_temp_val[2], "%.0f\xC2\xB0", bambu.chamber_temp);
+
+  // AMS: one page per unit (at least one), four tiles each; the tray in use
+  // is outlined.
+  int units = bambu.amsCount > 0 ? bambu.amsCount : 1;
+  for (int u = 0; u < BAMBU_MAX_AMS; u++)
+  {
+    (u < units ? lv_obj_clear_flag : lv_obj_add_flag)(bambu_ams_page[u], LV_OBJ_FLAG_HIDDEN);
+    if (u >= units) continue;
+    if (units > 1) lv_label_set_text_fmt(bambu_ams_cap[u], "AMS %d OF %d", u + 1, units);
+    else lv_label_set_text(bambu_ams_cap[u], "AMS");
+    bool have = u < bambu.amsCount;
+    BambuAms &a = bambu.ams[u];
+    if (have)
+    {
+      // Filament starts to suffer above ~40% - orange, then red.
+      lv_label_set_text_fmt(bambu_ams_env[u], "%d%% RH \xC2\xB7 %.0f\xC2\xB0" "C", a.humidity, a.temp);
+      lv_obj_set_style_text_color(bambu_ams_env[u], a.humidity >= 50 ? lv_color_hex(0xEF5350) : a.humidity >= 40 ? COLOR_SECONDARY : COLOR_TEXT_MUTED, LV_PART_MAIN);
+    }
+    else lv_label_set_text(bambu_ams_env[u], "no AMS data");
+    for (int i = 0; i < BAMBU_MAX_TRAYS; i++)
+    {
+      bool tray = have && i < a.trayCount;
+      BambuTray *tr = tray ? &a.trays[i] : NULL;
+      bool loaded = tray && (tr->tray_type[0] || tr->remain >= 0);
+      bool in_use = bambu.tray_now == u * BAMBU_MAX_TRAYS + i;
+      lv_color_t col;
+      bool has_col = loaded && parse_hex_color(tr->tray_color, &col);
+      lv_obj_set_style_bg_opa(bambu_tray_sw[u][i], has_col ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
+      if (has_col) lv_obj_set_style_bg_color(bambu_tray_sw[u][i], col, LV_PART_MAIN);
+      lv_label_set_text(bambu_tray_mat[u][i], loaded ? (tr->tray_type[0] ? tr->tray_type : "?") : "Empty");
+      lv_obj_set_style_text_color(bambu_tray_mat[u][i], loaded ? lv_color_hex(0xFFFFFF) : COLOR_TEXT_MUTED, LV_PART_MAIN);
+      int rem = loaded ? tr->remain : -1;
+      if (rem >= 0) lv_label_set_text_fmt(bambu_tray_rem[u][i], in_use ? "%d%% \xC2\xB7 in use" : "%d%%", rem);
+      else lv_label_set_text(bambu_tray_rem[u][i], in_use ? "in use" : loaded ? "--" : "");
+      lv_bar_set_value(bambu_tray_bar[u][i], rem > 0 ? rem : 0, LV_ANIM_OFF);
+      // Light filament stays visible on the dark track; very dark gets grey.
+      lv_color_t bar_col = has_col ? col : COLOR_TEXT_MUTED;
+      if (has_col && lv_color_brightness(col) < 40) bar_col = lv_color_hex(0x9AA4AD);
+      lv_obj_set_style_bg_color(bambu_tray_bar[u][i], bar_col, LV_PART_INDICATOR);
+      lv_obj_set_style_border_width(bambu_tray_tile[u][i], in_use ? 2 : 0, LV_PART_MAIN);
+    }
   }
 
-  int trayCount = bambu.amsCount > 0 ? bambu.ams[0].trayCount : 0;
-  for (int i = 0; i < BAMBU_MAX_TRAYS; i++)
+  // Bottom line: the printer's warnings (cycled by bambu_warning_cycle_cb),
+  // otherwise the fans.
+  if (bambu.has_warning)
   {
-    if (i >= trayCount) continue; // no live data for this slot yet - leave placeholder as-is
-    BambuTray &t = bambu.ams[0].trays[i];
-    int pct = t.remain >= 0 ? t.remain : 0;
-    if (bambu_slot_bar[i])
-    {
-      lv_bar_set_value(bambu_slot_bar[i], pct, LV_ANIM_OFF);
-      lv_color_t tray_col;
-      // Real filament color from the printer, not the fixed placeholder set
-      // at screen creation - falls back to the placeholder if this tray
-      // hasn't reported a color yet (e.g. empty slot).
-      if (parse_hex_color(t.tray_color, &tray_col)) lv_obj_set_style_bg_color(bambu_slot_bar[i], tray_col, LV_PART_INDICATOR);
-    }
-    if (bambu_slot_pct_lab[i])
-    {
-      if (t.remain >= 0) lv_label_set_text_fmt(bambu_slot_pct_lab[i], "%d%%", t.remain);
-      else lv_label_set_text(bambu_slot_pct_lab[i], "--");
-    }
+    if (bambu_warning_display_idx >= bambu.warning_count) bambu_warning_display_idx = 0;
+    const char *w = bambu.warning_count > 0 ? bambu.warning_list[bambu_warning_display_idx] : "";
+    lv_label_set_text_fmt(bambu_bottom_lab, LV_SYMBOL_WARNING "  %s", w[0] ? w : "Printer reports an issue");
+    lv_obj_set_style_text_color(bambu_bottom_lab, COLOR_WARNING, LV_PART_MAIN);
+  }
+  else
+  {
+    int f[3] = {fan_percent(bambu.cooling_fan_speed), fan_percent(bambu.big_fan1_speed), fan_percent(bambu.big_fan2_speed)};
+    char v[3][8];
+    for (int i = 0; i < 3; i++)
+      if (f[i] < 0) strcpy(v[i], "--");
+      else snprintf(v[i], sizeof(v[i]), "%d%%", f[i]);
+    lv_label_set_text_fmt(bambu_bottom_lab, "Part fan #CFD8DC %s#     Aux #CFD8DC %s#     Exhaust #CFD8DC %s#", v[0], v[1], v[2]);
+    lv_obj_set_style_text_color(bambu_bottom_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
   }
 }
 
@@ -596,6 +566,8 @@ void bambu_mqtt_callback(char *topic, byte *payload, unsigned int length)
   bambu.remain_time_min = print["mc_remaining_time"] | bambu.remain_time_min;
   bambu.bed_temp = print["bed_temper"] | bambu.bed_temp;
   bambu.nozzle_temp = print["nozzle_temper"] | bambu.nozzle_temp;
+  bambu.nozzle_target = json_as_float(print["nozzle_target_temper"], bambu.nozzle_target);
+  bambu.bed_target = json_as_float(print["bed_target_temper"], bambu.bed_target);
   bambu.cooling_fan_speed = json_as_int(print["cooling_fan_speed"], bambu.cooling_fan_speed);
   bambu.big_fan1_speed = json_as_int(print["big_fan1_speed"], bambu.big_fan1_speed);
   bambu.big_fan2_speed = json_as_int(print["big_fan2_speed"], bambu.big_fan2_speed);
@@ -709,6 +681,11 @@ void bambu_mqtt_callback(char *topic, byte *payload, unsigned int length)
 
   // Bambu sends partial/delta reports - only overwrite AMS state on messages
   // that actually include it, so we don't blank it out on unrelated updates.
+  if (!print["ams"]["tray_now"].isNull())
+  {
+    int t = json_as_int(print["ams"]["tray_now"], -1);
+    bambu.tray_now = t >= 0 && t < BAMBU_MAX_AMS * BAMBU_MAX_TRAYS ? t : -1;
+  }
   JsonArray amsArray = print["ams"]["ams"];
   if (!amsArray.isNull())
   {
@@ -828,205 +805,173 @@ void bambu_mqtt_maintain()
 }
 
 // ==================== Screen 2: Bambu printer ====================
+// A plain, non-clickable box (cards, tiles, swatches): taps and swipes go
+// through to the screen.
+static lv_obj_t *bambu_box(lv_obj_t *parent, lv_coord_t x, lv_coord_t y, lv_coord_t w, lv_coord_t h, uint32_t bg, lv_coord_t radius)
+{
+  lv_obj_t *o = lv_obj_create(parent);
+  lv_obj_set_pos(o, x, y);
+  lv_obj_set_size(o, w, h);
+  lv_obj_set_style_bg_color(o, lv_color_hex(bg), LV_PART_MAIN);
+  lv_obj_set_style_border_width(o, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(o, radius, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(o, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);
+  return o;
+}
+
+static lv_obj_t *bambu_label(lv_obj_t *parent, const lv_font_t *font, lv_color_t color, lv_coord_t x, lv_coord_t y, const char *text = "")
+{
+  lv_obj_t *l = lv_label_create(parent);
+  lv_label_set_text(l, text);
+  lv_obj_set_style_text_font(l, font, LV_PART_MAIN);
+  lv_obj_set_style_text_color(l, color, LV_PART_MAIN);
+  lv_obj_set_pos(l, x, y);
+  return l;
+}
+
+// Layout (480x480, page dots below y 450):
+//   title + status pill
+//   progress ring (percent, layer)  |  job, time left, done at, started
+//   nozzle / bed / chamber chips
+//   AMS: one page per unit, scrolled vertically, four tiles each
+//   fans - or the printer's warnings
 lv_obj_t *create_bambu_screen()
 {
   lv_obj_t *scr = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(scr, COLOR_BG, LV_PART_MAIN);
   lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-  // ---------------- Bambu printer card ----------------
-  lv_obj_t *pcard = lv_obj_create(scr);
-  // 472, not the full 480: keeps a thin 4px margin so the card doesn't sit
-  // flush against the physical screen edge, while still maximizing the
-  // width available to the chip row below.
-  lv_obj_set_size(pcard, 472, 436);
-  lv_obj_align(pcard, LV_ALIGN_CENTER, 0, 0);
-  lv_obj_set_style_bg_opa(pcard, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(pcard, 0, LV_PART_MAIN);
-  lv_obj_set_style_radius(pcard, 18, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(pcard, 18, LV_PART_MAIN);
-  lv_obj_clear_flag(pcard, LV_OBJ_FLAG_SCROLLABLE);
-
-  lv_obj_t *pname = lv_label_create(pcard);
-  lv_label_set_text_fmt(pname, "%s  " LV_SYMBOL_LIST, settings.printer_name); // tap: print history
-  lv_obj_set_style_text_color(pname, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(pname, &lv_font_ui_18, LV_PART_MAIN);
-  lv_obj_align(pname, LV_ALIGN_TOP_LEFT, 0, 2);
+  // ---- Title (tap: print history) and status ----
+  lv_obj_t *pname = bambu_label(scr, &lv_font_ui_20, lv_color_hex(0xFFFFFF), 22, 24);
+  lv_label_set_text_fmt(pname, "%s  " LV_SYMBOL_LIST, settings.printer_name);
   lv_obj_add_flag(pname, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(pname, LV_OBJ_FLAG_GESTURE_BUBBLE);
   lv_obj_set_ext_click_area(pname, 14);
   lv_obj_add_event_cb(pname, open_print_history, LV_EVENT_SHORT_CLICKED, NULL);
   bambu_pname_lab = pname;
 
-  lv_obj_t *pstatus_pill_lab = NULL;
-  lv_obj_t *pstatus_pill = make_pill(pcard, "PRINTING", COLOR_SUCCESS, lv_color_hex(0x0B2E13), &pstatus_pill_lab);
-  lv_obj_align(pstatus_pill, LV_ALIGN_TOP_RIGHT, 0, 0);
-  bambu_status_pill = pstatus_pill;
-  bambu_status_pill_lab = pstatus_pill_lab;
+  bambu_status_pill = make_pill(scr, "IDLE", lv_color_hex(0x4A555F), lv_color_hex(0xFFFFFF), &bambu_status_pill_lab);
+  lv_obj_align(bambu_status_pill, LV_ALIGN_TOP_RIGHT, -22, 22);
 
-  lv_obj_t *job = lv_label_create(pcard);
-  lv_label_set_text(job, "Benchy_v2.gcode");
-  lv_obj_set_style_text_color(job, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(job, &lv_font_ui_14, LV_PART_MAIN);
-  lv_obj_align(job, LV_ALIGN_TOP_LEFT, 0, 40);
-  bambu_job_lab = job;
+  // ---- Progress ring ----
+  lv_obj_t *arc = lv_arc_create(scr);
+  lv_obj_set_size(arc, 150, 150);
+  lv_obj_set_pos(arc, 22, 68);
+  lv_arc_set_rotation(arc, 270);
+  lv_arc_set_bg_angles(arc, 0, 360);
+  lv_arc_set_range(arc, 0, 100);
+  lv_arc_set_value(arc, 0);
+  lv_obj_remove_style(arc, NULL, LV_PART_KNOB);
+  lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_arc_width(arc, 12, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(arc, lv_color_hex(0x2E3540), LV_PART_MAIN);
+  lv_obj_set_style_arc_width(arc, 12, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(arc, COLOR_SECONDARY, LV_PART_INDICATOR);
+  bambu_arc = arc;
+  bambu_pct_lab = lv_label_create(arc);
+  lv_label_set_text(bambu_pct_lab, "0%");
+  lv_obj_set_style_text_font(bambu_pct_lab, &lv_font_roboto_medium_44, LV_PART_MAIN);
+  lv_obj_set_style_text_color(bambu_pct_lab, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_align(bambu_pct_lab, LV_ALIGN_CENTER, 0, -8);
+  bambu_layer_lab = lv_label_create(arc);
+  lv_label_set_text(bambu_layer_lab, "");
+  lv_obj_set_style_text_font(bambu_layer_lab, &lv_font_ui_12, LV_PART_MAIN);
+  lv_obj_set_style_text_color(bambu_layer_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
+  lv_obj_align(bambu_layer_lab, LV_ALIGN_CENTER, 0, 24);
 
-  lv_obj_t *bar = lv_bar_create(pcard);
-  lv_obj_set_size(bar, 436, 24);
-  lv_bar_set_range(bar, 0, 100);
-  lv_bar_set_value(bar, 75, LV_ANIM_OFF);
-  lv_obj_set_style_bg_color(bar, COLOR_BG, LV_PART_MAIN);
-  lv_obj_set_style_radius(bar, 12, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(bar, COLOR_SECONDARY, LV_PART_INDICATOR);
-  lv_obj_set_style_radius(bar, 12, LV_PART_INDICATOR);
-  lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 80);
-  bambu_bar = bar;
+  // ---- Job, time left, done at, started ----
+  bambu_job_lab = bambu_label(scr, &lv_font_ui_20, lv_color_hex(0xFFFFFF), 192, 72, "No active job");
+  lv_obj_set_size(bambu_job_lab, 266, 50); // two lines at most
+  lv_label_set_long_mode(bambu_job_lab, LV_LABEL_LONG_DOT);
+  bambu_time_lab = bambu_label(scr, &lv_font_roboto_medium_44, lv_color_hex(0xFFFFFF), 192, 122, "");
+  bambu_time_sub = bambu_label(scr, &lv_font_ui_14, COLOR_TEXT_MUTED, 0, 0, "left");
+  bambu_state_word = bambu_label(scr, &lv_font_ui_28, lv_color_hex(0xFFFFFF), 192, 126, "Idle");
+  lv_obj_add_flag(bambu_time_lab, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(bambu_time_sub, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_t **rows[2][2] = {{&bambu_done_row, &bambu_done_val}, {&bambu_start_row, &bambu_start_val}};
+  static const char *ROW_NAMES[2] = {"Done at", "Started"};
+  for (int i = 0; i < 2; i++)
+  {
+    lv_obj_t *row = bambu_box(scr, 192, 172 + i * 24, 266, 22, 0x000000, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN);
+    bambu_label(row, &lv_font_ui_14, COLOR_TEXT_MUTED, 0, 2, ROW_NAMES[i]);
+    lv_obj_t *v = bambu_label(row, &lv_font_ui_16, lv_color_hex(0xFFFFFF), 0, 0, "");
+    lv_obj_align(v, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+    *rows[i][0] = row;
+    *rows[i][1] = v;
+  }
 
-  lv_obj_t *prog = lv_label_create(pcard);
-  lv_label_set_text(prog, "75% complete  -  1h 24m left");
-  lv_obj_set_style_text_color(prog, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(prog, &lv_font_ui_14, LV_PART_MAIN);
-  lv_obj_align(prog, LV_ALIGN_TOP_LEFT, 0, 110);
-  bambu_prog_lab = prog;
-
-  lv_obj_t *temps = lv_obj_create(pcard);
-  lv_obj_set_size(temps, 436, 74);
-  lv_obj_align(temps, LV_ALIGN_TOP_LEFT, 0, 142);
-  lv_obj_set_style_bg_opa(temps, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(temps, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(temps, 0, LV_PART_MAIN);
-  lv_obj_set_flex_flow(temps, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(temps, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_clear_flag(temps, LV_OBJ_FLAG_SCROLLABLE);
-
-  // Chip widths are sized to each caption's actual rendered width (the
-  // widest text in that chip) rather than split evenly - "BED/CHAMBER" at
-  // font 12 needs ~102px on its own, while the others need well under 100.
-  make_stat_chip(temps, "230°C", "NOZZLE", COLOR_SECONDARY, &bambu_nozzle_val, 80, &lv_font_ui_22, LV_FLEX_ALIGN_END);
-  make_stat_chip2(temps, "55°C", "35°C", "BED/CHAMBER", COLOR_SECONDARY, &bambu_bed_val, &bambu_chamber_val, 140);
-  make_stat_chip2(temps, "142", "320", "LAYER", COLOR_PRIMARY, &bambu_layer_cur_val, &bambu_layer_tot_val, 80);
-  make_stat_chip2(temps, "--\xC2\xB0" "C", "--%", "AMS", COLOR_PRIMARY, &bambu_ams_temp_val, &bambu_ams_hum_val, 90);
-
-  // ---- Fans: cooling / aux / exhaust, each a hand-drawn 3-blade fan icon
-  // (hub + 3 blades in 3 cycled frames - see bambu_fan_spin_cb) + a percentage
-  // label. Blades start hidden; bambu_apply_to_ui() reveals frame 0 for
-  // whichever fans are actually reporting > 0.
-  static const char *fan_names[3] = {"COOLING", "AUX", "EXHAUST"};
+  // ---- Temperatures ----
+  static const char *TEMP_NAMES[3] = {"NOZZLE", "BED", "CHAMBER"};
   for (int i = 0; i < 3; i++)
   {
-    lv_coord_t fan_x = i * 140;
-
-    lv_obj_t *fan_icon = lv_obj_create(pcard);
-    lv_obj_set_size(fan_icon, 24, 24);
-    lv_obj_set_pos(fan_icon, fan_x, 222);
-    lv_obj_set_style_bg_opa(fan_icon, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(fan_icon, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(fan_icon, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(fan_icon, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_clear_flag(fan_icon, LV_OBJ_FLAG_CLICKABLE);
-
-    lv_obj_t *hub = lv_obj_create(fan_icon);
-    lv_obj_set_size(hub, 6, 6);
-    lv_obj_set_pos(hub, 9, 9);
-    lv_obj_set_style_radius(hub, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(hub, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_border_width(hub, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(hub, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_clear_flag(hub, LV_OBJ_FLAG_CLICKABLE);
-    bambu_fan_hub[i] = hub;
-
-    for (int fr = 0; fr < 3; fr++)
-    {
-      lv_obj_t *blade = lv_line_create(fan_icon);
-      lv_line_set_points(blade, fan_frame_pts[fr], 7);
-      // Gray to match the hub's default "off" look - apply logic recolors
-      // both together once real data arrives.
-      lv_obj_set_style_line_color(blade, COLOR_TEXT_MUTED, LV_PART_MAIN);
-      lv_obj_set_style_line_width(blade, 2, LV_PART_MAIN);
-      lv_obj_set_style_line_rounded(blade, true, LV_PART_MAIN);
-      lv_obj_add_flag(blade, LV_OBJ_FLAG_HIDDEN);
-      bambu_fan_blade[i][fr] = blade;
-    }
-    // Always show one static frame (even before we know the fan's state) -
-    // a fan should always look like a fan, just motionless when off.
-    lv_obj_clear_flag(bambu_fan_blade[i][0], LV_OBJ_FLAG_HIDDEN);
-
-    lv_obj_t *fname = lv_label_create(pcard);
-    lv_label_set_text(fname, fan_names[i]);
-    lv_obj_set_style_text_color(fname, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_text_font(fname, &lv_font_ui_12, LV_PART_MAIN);
-    lv_obj_set_pos(fname, fan_x + 30, 224);
-
-    lv_obj_t *fpct = lv_label_create(pcard);
-    lv_label_set_text(fpct, "--");
-    lv_obj_set_style_text_color(fpct, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_text_font(fpct, &lv_font_ui_14, LV_PART_MAIN);
-    lv_obj_set_pos(fpct, fan_x + 30, 240);
-    bambu_fan_pct_lab[i] = fpct;
+    lv_obj_t *chip = bambu_box(scr, 22 + i * 148, 230, 140, 60, 0x1E1E1E, 14);
+    bambu_temp_val[i] = bambu_label(chip, &lv_font_ui_24, i == 2 ? COLOR_PRIMARY : lv_color_hex(0xCFD8DC), 12, 6, "--\xC2\xB0");
+    lv_label_set_recolor(bambu_temp_val[i], true);
+    lv_obj_t *cap = bambu_label(chip, &lv_font_ui_12, COLOR_TEXT_MUTED, 12, 38, TEMP_NAMES[i]);
+    lv_obj_set_style_text_letter_space(cap, 1, LV_PART_MAIN);
   }
 
-  lv_obj_t *fdiv = lv_obj_create(pcard);
-  lv_obj_set_size(fdiv, 436, 1);
-  lv_obj_set_style_bg_color(fdiv, COLOR_BG, LV_PART_MAIN);
-  lv_obj_set_style_border_width(fdiv, 0, LV_PART_MAIN);
-  lv_obj_align(fdiv, LV_ALIGN_TOP_LEFT, 0, 262);
-  lv_obj_clear_flag(fdiv, LV_OBJ_FLAG_SCROLLABLE);
-
-  lv_obj_t *ams_lab = lv_label_create(pcard);
-  lv_label_set_text(ams_lab, "AMS");
-  lv_obj_set_style_text_color(ams_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
-  lv_obj_set_style_text_font(ams_lab, &lv_font_ui_12, LV_PART_MAIN);
-  lv_obj_set_style_text_letter_space(ams_lab, 1, LV_PART_MAIN);
-  lv_obj_align(ams_lab, LV_ALIGN_TOP_LEFT, 0, 274);
-
-  // Four AMS filament slots, each a two-color progress line: filled portion
-  // in the filament's color (real color once live data arrives - see
-  // parse_hex_color()), remainder in a neutral track with a white outline.
-  lv_color_t spool_colors[4] = {
-      lv_color_hex(0xFF7A00), // PLA Basic - Orange
-      lv_color_hex(0xECEFF1), // PETG Basic - White
-      lv_color_hex(0x2979FF), // TPU 95A - Blue
-      lv_color_hex(0x9C27B0), // PLA Basic - Purple
-  };
-  const int spool_percent[4] = {68, 15, 90, 42};
-
-  for (int i = 0; i < 4; i++)
+  // ---- AMS: one 108 px page per unit, scrolled vertically (a horizontal
+  // swipe still changes screens) and snapped page by page ----
+  lv_obj_t *ams = lv_obj_create(scr);
+  lv_obj_set_pos(ams, 22, 298);
+  lv_obj_set_size(ams, 436, 108);
+  lv_obj_set_style_bg_opa(ams, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(ams, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(ams, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(ams, 0, LV_PART_MAIN);
+  lv_obj_set_scroll_dir(ams, LV_DIR_VER);
+  lv_obj_set_scroll_snap_y(ams, LV_SCROLL_SNAP_START);
+  lv_obj_set_scrollbar_mode(ams, LV_SCROLLBAR_MODE_ACTIVE);
+  lv_obj_add_flag(ams, LV_OBJ_FLAG_GESTURE_BUBBLE);
+  lv_obj_add_flag(ams, LV_OBJ_FLAG_SCROLL_ONE);
+  for (int u = 0; u < BAMBU_MAX_AMS; u++)
   {
-    lv_coord_t row_y = 296 + i * 24;
-
-    lv_obj_t *slot_bar = lv_bar_create(pcard);
-    lv_obj_set_size(slot_bar, 368, 8);
-    lv_obj_set_pos(slot_bar, 0, row_y);
-    lv_bar_set_range(slot_bar, 0, 100);
-    lv_bar_set_value(slot_bar, spool_percent[i], LV_ANIM_OFF);
-    // White track (not dark gray) so a dark/black filament's fill still
-    // shows up against the empty portion - a dark fill on a dark track was
-    // effectively invisible.
-    lv_obj_set_style_bg_color(slot_bar, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_style_radius(slot_bar, 4, LV_PART_MAIN);
-    // Outer outline in a neutral gray (not white, since the track itself is
-    // now white and a white border on white would vanish).
-    lv_obj_set_style_border_width(slot_bar, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(slot_bar, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    // Inset the fill so it doesn't draw over the border - without this the
-    // indicator extends edge-to-edge and hides the outline entirely.
-    lv_obj_set_style_pad_all(slot_bar, 1, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(slot_bar, spool_colors[i], LV_PART_INDICATOR);
-    lv_obj_set_style_radius(slot_bar, 3, LV_PART_INDICATOR);
-    // Dark outline on the fill itself too - insurance for the opposite case
-    // (a white/light filament would otherwise blend into the white track).
-    lv_obj_set_style_border_width(slot_bar, 1, LV_PART_INDICATOR);
-    lv_obj_set_style_border_color(slot_bar, lv_color_hex(0x000000), LV_PART_INDICATOR);
-
-    lv_obj_t *pct = lv_label_create(pcard);
-    lv_label_set_text_fmt(pct, "%d%%", spool_percent[i]);
-    lv_obj_set_style_text_color(pct, COLOR_TEXT_MUTED, LV_PART_MAIN);
-    lv_obj_set_style_text_font(pct, &lv_font_ui_12, LV_PART_MAIN);
-    lv_obj_set_pos(pct, 382, row_y - 3);
-
-    bambu_slot_bar[i] = slot_bar;
-    bambu_slot_pct_lab[i] = pct;
+    lv_obj_t *page = bambu_box(ams, 0, u * 108, 436, 108, 0x000000, 0);
+    lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_add_flag(page, LV_OBJ_FLAG_SNAPPABLE);
+    bambu_ams_page[u] = page;
+    bambu_ams_cap[u] = bambu_label(page, &lv_font_ui_12, COLOR_TEXT_MUTED, 0, 0, "AMS");
+    lv_obj_set_style_text_letter_space(bambu_ams_cap[u], 1, LV_PART_MAIN);
+    bambu_ams_env[u] = bambu_label(page, &lv_font_ui_12, COLOR_TEXT_MUTED, 0, 0, "");
+    lv_obj_align(bambu_ams_env[u], LV_ALIGN_TOP_RIGHT, 0, 0);
+    for (int i = 0; i < BAMBU_MAX_TRAYS; i++)
+    {
+      lv_obj_t *tile = bambu_box(page, i * 111, 20, 103, 86, 0x1E1E1E, 14);
+      lv_obj_set_style_border_color(tile, COLOR_SECONDARY, LV_PART_MAIN);
+      bambu_tray_tile[u][i] = tile;
+      lv_obj_t *sw = bambu_box(tile, 10, 8, 22, 22, 0x000000, LV_RADIUS_CIRCLE);
+      lv_obj_set_style_border_width(sw, 2, LV_PART_MAIN);
+      lv_obj_set_style_border_color(sw, lv_color_hex(0x3A4652), LV_PART_MAIN);
+      lv_obj_set_style_bg_opa(sw, LV_OPA_TRANSP, LV_PART_MAIN);
+      bambu_tray_sw[u][i] = sw;
+      bambu_tray_mat[u][i] = bambu_label(tile, &lv_font_ui_14, COLOR_TEXT_MUTED, 10, 34, "Empty");
+      bambu_tray_rem[u][i] = bambu_label(tile, &lv_font_ui_12, COLOR_TEXT_MUTED, 10, 52, "");
+      lv_obj_set_width(bambu_tray_rem[u][i], 85);
+      lv_label_set_long_mode(bambu_tray_rem[u][i], LV_LABEL_LONG_DOT);
+      lv_obj_t *bar = lv_bar_create(tile);
+      lv_obj_set_pos(bar, 10, 72);
+      lv_obj_set_size(bar, 83, 4);
+      lv_bar_set_range(bar, 0, 100);
+      lv_obj_set_style_bg_color(bar, lv_color_hex(0x2E3540), LV_PART_MAIN);
+      lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+      lv_obj_set_style_radius(bar, 2, LV_PART_MAIN);
+      lv_obj_set_style_radius(bar, 2, LV_PART_INDICATOR);
+      lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+      bambu_tray_bar[u][i] = bar;
+    }
+    if (u > 0) lv_obj_add_flag(page, LV_OBJ_FLAG_HIDDEN);
   }
+
+  // ---- Fans, or the printer's warnings ----
+  bambu_bottom_lab = bambu_label(scr, &lv_font_ui_12, COLOR_TEXT_MUTED, 22, 420, "");
+  lv_obj_set_width(bambu_bottom_lab, 436);
+  lv_label_set_long_mode(bambu_bottom_lab, LV_LABEL_LONG_DOT);
+  lv_label_set_recolor(bambu_bottom_lab, true);
 
   return scr;
 }
@@ -1075,10 +1020,10 @@ void start_finish_screen_flash()
 // Bambu job label to show them one at a time, 5 seconds apart.
 void bambu_warning_cycle_cb(lv_timer_t *timer)
 {
-  if (!bambu.has_warning || bambu.warning_count <= 1 || !bambu_job_lab) return;
+  if (!bambu.has_warning || bambu.warning_count <= 1 || !bambu_bottom_lab) return;
   bambu_warning_display_idx = (bambu_warning_display_idx + 1) % bambu.warning_count;
   const char *w = bambu.warning_list[bambu_warning_display_idx];
-  lv_label_set_text_fmt(bambu_job_lab, "WARNING: %s", w[0] ? w : "printer reports an issue");
+  lv_label_set_text_fmt(bambu_bottom_lab, LV_SYMBOL_WARNING "  %s", w[0] ? w : "Printer reports an issue");
 }
 
 // 3 blinks of the Home badge to draw attention to a Bambu connection error;

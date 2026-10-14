@@ -145,7 +145,7 @@ If you'd rather stay on LVGL 9.5+, you'll need to update the sketch's display-in
 Use the corners or swipe left/right to move between them (see [Navigation](#navigation)):
 
 1. **Home**: clock, date, current weather (icon, temperature, humidity, wind, UV) and the next calendar event or flight; a print in progress shows its percentage and time left. Tap the weather for the Forecast, the "Next" card for the Agenda
-2. **Bambu Lab printer**: status, progress, temperatures, layers, AMS trays and humidity (orange from 40%, red from 50%), fans and HMS warnings. Tap the printer name for the **print history**: the last 6 prints, finished or failed, with date and duration
+2. **Bambu Lab printer**: status, a progress ring with the layer, job, time left with the clock time it'll be done (and when it started), nozzle / bed / chamber temperatures with their targets, the AMS trays (colour, material, remaining, the one in use outlined; more than one AMS scrolls up and down, with each unit's humidity, orange from 40%, red from 50%), the fans, and HMS warnings in their place. Tap the printer name for the **print history**: the last 6 prints, finished or failed, with date and duration
 3. **Calendar**: the current month with event days marked; tap a day for its events
 4. **Proxmox cluster**: up to 3 nodes with status, CPU, RAM, disk and uptime
 5. **Stocks**: up to 7 quotes with daily change and a sparkline of today's price (15-minute steps, with a faint line at yesterday's close)
