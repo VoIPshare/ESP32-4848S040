@@ -2,12 +2,12 @@
 // The stats row under the weather shares its place with two cards:
 //  - an incoming call (asterisk.ino), ahead of everything: while it rings,
 //    and CALL_SHOW_AFTER_MS after (CALL_SHOW_MAX_MS at most; a tap hides it);
-//  - what's playing on Jellyfin (jellyfin.ino) and new voicemails
-//    (asterisk.ino), taking turns with the stats every SLOT_SWAP_MS while
-//    there's something to show.
+//  - what's playing on Jellyfin (jellyfin.ino), taking turns with the stats
+//    every SLOT_SWAP_MS while something plays.
 // Only one of the three shows at a time; weather_slot_tick() picks it.
+// Voicemail has its own envelope on every screen (top-right), not a card here.
 // With "Big caller ID" (setup page) a ringing call covers the whole
-// weather panel instead: the number as big as the clock, the name above it.
+// weather panel instead: the number in big digits, the name above it.
 // (Named weather_slot so it's merged after asterisk.ino and jellyfin.ino.)
 
 #define CALL_SHOW_AFTER_MS (30UL * 1000UL)
@@ -17,13 +17,11 @@
 static lv_obj_t *home_call_card = NULL, *home_call_name = NULL, *home_call_sub = NULL;
 static lv_obj_t *home_media_card = NULL, *home_media_icon = NULL, *home_media_title = NULL, *home_media_who = NULL,
                 *home_media_pct = NULL, *home_media_bar = NULL, *home_media_btn = NULL, *home_media_btn_lab = NULL;
-static lv_obj_t *home_vm_card = NULL, *home_vm_count = NULL, *home_vm_from = NULL;
 static lv_obj_t *home_call_big = NULL, *home_call_big_name = NULL, *home_call_big_num = NULL;
 static lv_obj_t *vm_icon = NULL, *vm_icon_lab = NULL; // every screen, next to the Wi-Fi icon
 static uint32_t call_shown_ms = 0, call_ringing_ms = 0; // when it started / was last seen ringing
 static bool call_showing = false;
 static bool media_playing = false;
-static bool vm_waiting = false;
 
 // A rounded card in the stats row's spot (stats: 80 px tall, 56 px above
 // the panel's bottom; the card is centered on the same line).
@@ -118,16 +116,6 @@ void build_home_slot_cards(lv_obj_t *parent)
   lv_obj_set_style_radius(home_media_bar, 2, LV_PART_MAIN);
   lv_obj_set_style_radius(home_media_bar, 2, LV_PART_INDICATOR);
 
-  // Voicemail: envelope, "2 new voicemails", who left the last one and when.
-  home_vm_card = slot_card(parent, lv_color_hex(0x3A2A12));
-  lv_obj_t *env = lv_label_create(home_vm_card);
-  lv_label_set_text(env, LV_SYMBOL_ENVELOPE);
-  lv_obj_set_style_text_font(env, &lv_font_ui_24, LV_PART_MAIN);
-  lv_obj_set_style_text_color(env, COLOR_SECONDARY, LV_PART_MAIN);
-  lv_obj_align(env, LV_ALIGN_LEFT_MID, 18, 0);
-  home_vm_count = slot_label(home_vm_card, &lv_font_ui_22, lv_color_hex(0xFFFFFF), 58, 7, 366);
-  home_vm_from = slot_label(home_vm_card, &lv_font_ui_14, lv_color_hex(0xFFCC80), 58, 38, 366);
-
   // Big caller ID: the whole weather panel, everything centered.
   home_call_big = lv_obj_create(parent);
   lv_obj_set_size(home_call_big, 480, 300);
@@ -195,15 +183,7 @@ static void weather_slot_tick(lv_timer_t *t)
   }
   lv_obj_t *want = home_weather_stats;
   if (call_showing) want = home_call_card;
-  else
-  {
-    // The stats, then whichever of media / voicemail has something, in turn.
-    lv_obj_t *turns[3] = {home_weather_stats};
-    int n = 1;
-    if (media_playing) turns[n++] = home_media_card;
-    if (vm_waiting) turns[n++] = home_vm_card;
-    want = turns[(millis() / SLOT_SWAP_MS) % n];
-  }
+  else if (media_playing && (millis() / SLOT_SWAP_MS) % 2) want = home_media_card;
   if (call_showing && settings.call_big)
   {
     if (lv_obj_has_flag(home_call_big, LV_OBJ_FLAG_HIDDEN))
@@ -214,7 +194,7 @@ static void weather_slot_tick(lv_timer_t *t)
     want = home_weather_stats; // underneath, for when it goes
   }
   else if (home_call_big && !lv_obj_has_flag(home_call_big, LV_OBJ_FLAG_HIDDEN)) lv_obj_add_flag(home_call_big, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_t *all[] = {home_weather_stats, home_call_card, home_media_card, home_vm_card};
+  lv_obj_t *all[] = {home_weather_stats, home_call_card, home_media_card};
   for (lv_obj_t *o : all)
   {
     if (!o) continue;
@@ -242,14 +222,13 @@ void home_call_apply()
     lv_label_set_text(home_call_name, call_number[0] ? num : tr(S_UNKNOWN));
     lv_label_set_text(home_call_sub, tr(S_INCOMING_CALL));
   }
-  // Big view: the name in its own size above the number. The number font
-  // only has digits ( ) - + and space: anything else (no number, letters)
-  // goes in the name line instead. "514 555-1234" splits after the area
-  // code to fit at 96 px (one line would need 72 px); long international
-  // numbers drop to 56 px.
+  // Big view: the name in its own size above the number. The number fonts
+  // only have digits - + and space: anything else (no number, letters,
+  // brackets) goes in the name line instead. "514 555-1234" splits after
+  // the area code to fit at 90 px; long international numbers drop to 56 px.
   bool digits_only = call_number[0] != '\0';
   for (const char *p = num; *p; p++)
-    if (!strchr("0123456789()-+ ", *p)) digits_only = false;
+    if (!strchr("0123456789-+ ", *p)) digits_only = false;
   lv_label_set_text(home_call_big_name, named ? call_name : digits_only ? "" : call_number[0] ? call_number : tr(S_UNKNOWN));
   (lv_label_get_text(home_call_big_name)[0] ? lv_obj_clear_flag : lv_obj_add_flag)(home_call_big_name, LV_OBJ_FLAG_HIDDEN);
   if (digits_only)
@@ -260,8 +239,8 @@ void home_call_apply()
     bool na = len == 12 && big[3] == ' ' && big[7] == '-';
     if (na) big[3] = '\n'; // "514\n555-1234"
     bool large = na || len <= 8;
-    lv_obj_set_style_text_font(home_call_big_num, large ? &lv_font_roboto_bold_96 : &lv_font_roboto_bold_56, LV_PART_MAIN);
-    lv_obj_set_style_text_line_space(home_call_big_num, large ? -24 : 0, LV_PART_MAIN);
+    lv_obj_set_style_text_font(home_call_big_num, large ? &lv_font_roboto_regular_90 : &lv_font_roboto_regular_56, LV_PART_MAIN);
+    lv_obj_set_style_text_line_space(home_call_big_num, large ? 6 : 0, LV_PART_MAIN);
     lv_label_set_text(home_call_big_num, big);
     lv_obj_clear_flag(home_call_big_num, LV_OBJ_FLAG_HIDDEN);
   }
@@ -301,39 +280,9 @@ void home_media_apply()
 // loop(): the voicemail count changed.
 void home_vm_apply()
 {
-  if (!home_vm_card) return;
   data_lock();
-  vm_waiting = vm_new_total > 0;
   vm_icon_update();
-  if (vm_waiting)
-  {
-    if (vm_new_total == 1) lv_label_set_text(home_vm_count, tr(S_VM_ONE));
-    else lv_label_set_text_fmt(home_vm_count, tr(S_VM_MANY), vm_new_total);
-    if (vm_last_number[0])
-    {
-      char who[96], when[32] = "";
-      char num[40];
-      format_phone(vm_last_number, num, sizeof(num));
-      if (vm_last_name[0] && strcmp(vm_last_name, vm_last_number)) snprintf(who, sizeof(who), "%s %s", vm_last_name, num);
-      else strlcpy(who, num, sizeof(who));
-      struct tm t, today;
-      time_t now = time(nullptr);
-      if (vm_last_time > 1700000000 && localtime_r(&vm_last_time, &t) && localtime_r(&now, &today))
-      {
-        if (t.tm_yday == today.tm_yday && t.tm_year == today.tm_year) snprintf(when, sizeof(when), "  \xE2\x80\xA2  %02d:%02d", t.tm_hour, t.tm_min);
-        else
-        {
-          char day[24];
-          format_day_month(day, sizeof(day), t.tm_mon, t.tm_mday);
-          snprintf(when, sizeof(when), "  \xE2\x80\xA2  %s %02d:%02d", day, t.tm_hour, t.tm_min);
-        }
-      }
-      lv_label_set_text_fmt(home_vm_from, "%s %s%s", tr(S_VM_FROM), who, when);
-    }
-    else lv_label_set_text(home_vm_from, ""); // counted at boot: who left them isn't known
-  }
   data_unlock();
-  weather_slot_tick(NULL);
 }
 
 static void slot_open_screen_cb(lv_event_t *e)
@@ -360,7 +309,7 @@ static void slot_play_pause_cb(lv_event_t *e)
 void home_slot_cards_clickable()
 {
   struct { lv_obj_t *card; uint8_t screen; } cards[] = {
-      {home_media_card, JF_SCREEN_INDEX}, {home_vm_card, PHONE_SCREEN_INDEX}, {home_call_card, PHONE_SCREEN_INDEX}};
+      {home_media_card, JF_SCREEN_INDEX}, {home_call_card, PHONE_SCREEN_INDEX}};
   for (auto &c : cards)
   {
     lv_obj_add_flag(c.card, LV_OBJ_FLAG_CLICKABLE);

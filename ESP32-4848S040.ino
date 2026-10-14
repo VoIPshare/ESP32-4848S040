@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.25"
+#define FW_VERSION "3.27"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -61,10 +61,11 @@
 // before it's declared.
 enum WeatherIconType { WICON_CLEAR, WICON_PARTLY_CLOUDY, WICON_CLOUDY, WICON_FOG, WICON_DRIZZLE, WICON_RAIN, WICON_SNOW, WICON_THUNDER };
 
-// Custom 86px regular font (Roboto Regular, subset to 0-9 : ° C F) used for
-// the clock and the weather temperature - see lv_font_roboto_regular_86.c.
+// Big numbers in Roboto Regular: 90 px (0-9 : ° C F - + space) for the
+// weather temperature and the Big caller ID number, 56 px (0-9 - + space)
+// for long international numbers. The clocks are Roboto Bold (0-9 :).
 extern "C" {
-extern const lv_font_t lv_font_roboto_regular_86;
+extern const lv_font_t lv_font_roboto_regular_90, lv_font_roboto_regular_56;
 // UI text: LVGL's built-in Montserrat (same file, same symbols) plus Latin-1
 // accents and typographic quotes, for Italian/French and accented titles.
 // Made with lv_font_conv - see the README.
@@ -79,8 +80,7 @@ LV_FONT_DECLARE(lv_font_ui_26);
 LV_FONT_DECLARE(lv_font_ui_28);
 
 // Bigger, bold digits-and-colon-only Roboto for the Home clock.
-extern const lv_font_t lv_font_roboto_bold_136;
-extern const lv_font_t lv_font_roboto_bold_96, lv_font_roboto_bold_56; // digits ( ) - + only: phone numbers
+extern const lv_font_t lv_font_roboto_bold_136, lv_font_roboto_bold_126; // clock: night clock / Home
 // Home screen shortcut icons (Material Design Icons) - see home_icons.c /
 // tools/make_home_icons.py.
 extern const lv_img_dsc_t home_icon_home, home_icon_printer, home_icon_calendar, home_icon_server, home_icon_stocks,
@@ -433,7 +433,7 @@ struct DeviceSettings
   char ami_secret[64] = "";
   char ami_ext[48] = "";
   char ami_context[32] = "from-internal"; // dialplan context for "call back" (Originate)
-  bool call_big = false; // a ringing call covers the whole weather panel, number as big as the clock
+  bool call_big = false; // a ringing call covers the whole weather panel, number in big digits
   // Jellyfin (jellyfin.ino): server address and an API key (Dashboard -> API Keys).
   char jf_url[96] = "";
   char jf_key[48] = "";
@@ -783,7 +783,7 @@ void nav_shortcuts_apply_mode()
   bool always = settings.home_shortcuts == SHORTCUTS_ALWAYS;
   if (home_shortcuts_row) (always ? lv_obj_clear_flag : lv_obj_add_flag)(home_shortcuts_row, LV_OBJ_FLAG_HIDDEN);
   // Clock center at y=82 (y=94 under the icon row); the divider is at y=150.
-  if (home_time_row) lv_obj_align(home_time_row, LV_ALIGN_CENTER, 0, always ? 4 : -8);
+  if (home_time_row) lv_obj_align(home_time_row, LV_ALIGN_CENTER, 0, always ? 10 : -2);
   // Kept with shortcuts off too: the same corner toggles the screen pin.
   if (nav_menu_hotspot) (in_settings ? lv_obj_add_flag : lv_obj_clear_flag)(nav_menu_hotspot, LV_OBJ_FLAG_HIDDEN);
 }
@@ -1212,9 +1212,7 @@ static volatile bool weather_needs_ui_refresh = false;
 
 void weather_apply_to_ui()
 {
-  // NOTE: the custom clock/temperature font only has glyphs for 0-9 : ° C F,
-  // so a below-zero reading (no '-' glyph) would render with a missing
-  // character - fine for most climates but flag it if you're somewhere cold.
+  // lv_font_roboto_regular_90 has 0-9 : ° C F and '-' (below zero).
   if (weather_temp_lab) lv_label_set_text_fmt(weather_temp_lab, "%.0f\xC2\xB0" "C", weather_data.temp);
   if (weather_desc_lab) lv_label_set_text(weather_desc_lab, wmo_weather_desc(weather_data.wcode));
   if (weather_extra_lab)
@@ -1917,7 +1915,7 @@ void send_settings_page()
   pg(F("</div><div>"));
   page_text("Dial context (call back)", "amictx", settings.ami_context, "from-internal");
   pg(F("</div></div><input type='hidden' name='ami_form' value='1'>"));
-  page_switch("Big caller ID (the number as big as the clock)", "callbig", settings.call_big);
+  page_switch("Big caller ID (the number in big digits)", "callbig", settings.call_big);
   page_hint(F("<code>manager.conf</code>: <code>read = call</code>, <code>write = reporting,originate</code> (voicemail "
                  "counts; call back rings the first extension, then dials the number)."));
   page_section_end();
@@ -3343,10 +3341,8 @@ lv_obj_t *create_home_screen()
 
   // Hour/minute each get a fixed-width slot so the digits never shift the
   // layout when they change between one and two visually-wide characters.
-  // Slot width/row height/offsets below are scaled ~0.9x from their old
-  // lv_font_roboto_bold_94 values, matching that font's narrower, shorter
-  // lv_font_roboto_regular_86 replacement (adv_w 773 vs 863, line_height 63
-  // vs 70 - see lv_font_roboto_regular_86.c / lv_font_roboto_bold_94.c).
+  // Clock font: lv_font_roboto_bold_126 (digits and ':' only, 72 px per
+  // digit), so each slot is 160 px wide.
   lv_obj_t *time_row = lv_obj_create(clock_panel);
   lv_obj_set_size(time_row, 460, 100);
   lv_obj_set_style_bg_opa(time_row, LV_OPA_TRANSP, LV_PART_MAIN);
@@ -3356,27 +3352,29 @@ lv_obj_t *create_home_screen()
   lv_obj_set_flex_flow(time_row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_set_style_pad_column(time_row, 0, LV_PART_MAIN);
-  lv_obj_align(time_row, LV_ALIGN_CENTER, 0, -8);
+  // 126 px (the night clock keeps 136) and a bit lower: clear of the
+  // voicemail envelope and Wi-Fi icon in the top-right corner.
+  lv_obj_align(time_row, LV_ALIGN_CENTER, 0, -2);
   home_time_row = time_row; // re-placed by nav_shortcuts_apply_mode(): higher when the Home icon row is off
 
   lv_obj_t *hour_val = lv_label_create(time_row);
-  lv_obj_set_width(hour_val, 172);
+  lv_obj_set_width(hour_val, 160);
   lv_obj_set_style_text_align(hour_val, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_text(hour_val, "14");
   lv_obj_set_style_text_color(hour_val, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(hour_val, &lv_font_roboto_bold_136, LV_PART_MAIN);
+  lv_obj_set_style_text_font(hour_val, &lv_font_roboto_bold_126, LV_PART_MAIN);
 
   lv_obj_t *colon_val = lv_label_create(time_row);
   lv_label_set_text(colon_val, ":");
   lv_obj_set_style_text_color(colon_val, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(colon_val, &lv_font_roboto_bold_136, LV_PART_MAIN);
+  lv_obj_set_style_text_font(colon_val, &lv_font_roboto_bold_126, LV_PART_MAIN);
 
   lv_obj_t *min_val = lv_label_create(time_row);
-  lv_obj_set_width(min_val, 172);
+  lv_obj_set_width(min_val, 160);
   lv_obj_set_style_text_align(min_val, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_text(min_val, "32");
   lv_obj_set_style_text_color(min_val, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(min_val, &lv_font_roboto_bold_136, LV_PART_MAIN);
+  lv_obj_set_style_text_font(min_val, &lv_font_roboto_bold_126, LV_PART_MAIN);
 
   home_hour_label = hour_val;
   home_min_label = min_val;
@@ -3470,7 +3468,7 @@ lv_obj_t *create_home_screen()
   lv_obj_t *temp = lv_label_create(weather_panel);
   lv_label_set_text(temp, "24°C");
   lv_obj_set_style_text_color(temp, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(temp, &lv_font_roboto_regular_86, LV_PART_MAIN);
+  lv_obj_set_style_text_font(temp, &lv_font_roboto_regular_90, LV_PART_MAIN);
   lv_obj_align(temp, LV_ALIGN_TOP_RIGHT, -24, 24);
   weather_temp_lab = temp;
 

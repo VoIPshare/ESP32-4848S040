@@ -21,7 +21,7 @@ More in the [Gallery](#gallery).
 | Packages (up to 5) | [PKGE](https://business.pkge.net) | PKGE API key | every 2 hours |
 | Home Assistant (up to 8 entities, tap to toggle) | [Home Assistant](https://www.home-assistant.io/) REST API | address, long-lived token, entity IDs | every 10 s while showing, 5 min otherwise |
 | Flight on the Home strip (optional live status) | calendar titles, [AeroDataBox](https://rapid.aerodatabox.com) via RapidAPI | RapidAPI key (optional) | every 30 min on the day, 10 min around departure/landing |
-| Caller ID on Home while it rings and 30 s after, in place of humidity / wind / UV; new voicemails (envelope with the count on every screen) and who left the last one | [Asterisk](https://www.asterisk.org/) Manager Interface (AMI, TCP 5038) | manager host, AMI user/secret, extensions (optional) | live (`DialBegin`, `MessageWaiting` events) |
+| Caller ID on Home while it rings and 30 s after, in place of humidity / wind / UV; new voicemails (envelope with the count on every screen; who left the last one on the Phone screen) | [Asterisk](https://www.asterisk.org/) Manager Interface (AMI, TCP 5038) | manager host, AMI user/secret, extensions (optional) | live (`DialBegin`, `MessageWaiting` events) |
 | Jellyfin now playing on Home, alternating with humidity / wind / UV every 20 s | [Jellyfin](https://jellyfin.org/) `/Sessions` API | address, API key | every 20 s |
 
 Flights in your calendar (titles like `AC871 YUL->YYZ`, `TS399 PUJ->YUL` or anything containing "flight") are pinned on the Home strip from 24 hours before departure, with a countdown. With an AeroDataBox key the strip also shows delays, gate, "In the air" and "Landed".
@@ -156,7 +156,7 @@ Use the corners or swipe left/right to move between them (see [Navigation](#navi
 10. **Phone** (Asterisk): only once it's set up; the AMI connection state, voicemail (new and old, who left the last one and when) and the last 6 calls to your extensions (answered, missed, busy) with a call-back button: your first extension rings, then it dials the number
 11. **Jellyfin**: only once it's set up; up to 2 streams with title, who/where, progress and previous / play-pause / next / stop (for clients that allow remote control), plus the library counts
 
-On Home, the humidity / wind / UV row takes turns every 20 s with what's playing on Jellyfin and new voicemails, when there are any; a ringing call replaces it while it rings and for 30 s after (a tap hides it), or, with **Big caller ID** (setup page, Asterisk section), covers the whole weather area: the caller's name, and the number as big as the clock. North American numbers show as `514 555-1234`. An envelope in the top-right corner shows voicemail on every screen (in the Wi-Fi icon's place while that one is hidden, next to it otherwise): grey when there's nothing new, orange with the count of new messages, `?` while the counts aren't known yet (the Phone screen says why). Tap the Jellyfin card for the Jellyfin screen (its button plays / pauses), the voicemail or call card for the Phone screen.
+On Home, the humidity / wind / UV row takes turns every 20 s with what's playing on Jellyfin, when something plays; a ringing call replaces it while it rings and for 30 s after (a tap hides it), or, with **Big caller ID** (setup page, Asterisk section), covers the whole weather area: the caller's name, and the number in big digits. North American numbers show as `514 555-1234`. An envelope in the top-right corner shows voicemail on every screen (in the Wi-Fi icon's place while that one is hidden, next to it otherwise): grey when there's nothing new, orange with the count of new messages, `?` while the counts aren't known yet (the Phone screen says why). Tap the Jellyfin card for the Jellyfin screen (its button plays / pauses), the call card for the Phone screen.
 
 ## Settings screen
 
@@ -280,6 +280,8 @@ npx lv_font_conv --no-compress --no-prefilter --bpp 4 --size 16 --font Montserra
 
 Then change its include to plain `#include "lvgl.h"`.
 
+The big numbers are Roboto subsets made the same way (`--font Roboto-Bold.ttf` / `Roboto-Regular.ttf --size N --bpp 4 --symbols "..." --no-kerning --no-compress`): the Home clock (`lv_font_roboto_bold_126`, Bold, `0123456789:`), the night clock (`lv_font_roboto_bold_136`), the temperature and the Big caller ID number (`lv_font_roboto_regular_90`, Regular, `0123456789:°CF-+ `), and long international numbers (`lv_font_roboto_regular_56`, `0123456789-+ `). Characters that dip below the baseline, like brackets, would make the line taller and move the temperature down, so they're left out.
+
 ## Data flow
 
 ```
@@ -347,7 +349,7 @@ ESP32-4848S040/
 ├── ESP32-4848S040.ino          ← Main sketch (upload this): display, Home, settings, Wi-Fi portal, network task
 ├── bambu.ino / calendar.ino / proxmox.ino / stocks.ino / makerworld.ino / tracking.ino / flight.ino / homeassistant.ino / asterisk.ino / jellyfin.ino  ← one tab per screen (calendar.ino also has the Agenda)
 ├── forecast.ino                 ← Forecast page
-├── weather_slot.ino             ← Home: humidity / wind / UV row shared with calls, voicemail and Jellyfin
+├── weather_slot.ino             ← Home: humidity / wind / UV row shared with calls and Jellyfin; the voicemail envelope
 ├── alerts.ino / screensaver.ino ← alert banner, night clock
 ├── web_fetch.ino                ← schedules the direct fetches and copies results into the screens
 ├── direct_fetch.cpp/.h          ← Open-Meteo geocoding, Yahoo, iCal parser, MakerWorld, PKGE, AeroDataBox
