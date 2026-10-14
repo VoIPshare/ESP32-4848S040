@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.21"
+#define FW_VERSION "3.22"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -27,6 +27,8 @@
 #include "bootloader_random.h"
 #include "nvs.h"
 #include "esp_task_wdt.h"
+#include "esp_ota_ops.h"
+#include "esp_image_format.h"
 #include "mbedtls/platform.h"
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
@@ -1847,7 +1849,7 @@ String build_settings_page()
       "> Big caller ID: a ringing call fills the whole weather area, the number as big as the clock</label>"
       "<label style='margin-top:2px;font-size:11px'>A user in <i>/etc/asterisk/manager.conf</i> with "
       "<i>read = call</i> and <i>write = reporting,originate</i> is enough (originate: only for call back, which "
-      "rings the first extension above, then dials the number). A ringing call shows the caller on Home for 15 s, in place of "
+      "rings the first extension above, then dials the number). A ringing call shows the caller on Home while it rings and 30 s after, in place of "
       "humidity / wind / UV; new voicemails (and who left the last one) take turns there with the weather. "
       "Mailboxes are the extensions above, in context <i>default</i> (write <i>101@other</i> for another one). "
       "Enter - as secret to remove it.</label>"
@@ -1873,6 +1875,19 @@ String build_settings_page()
       "<input type='file' name='fw' accept='.bin' required>"
       "</fieldset>"
       "<button type='submit'>Upload firmware</button>"
+      "</form>"
+      "<form method='POST' action='/ghinstall' "
+      "onsubmit=\"return confirm('Install this firmware from GitHub now? The device restarts.')\">"
+      "<fieldset><legend>Install from GitHub</legend>"
+      "<label>Installs a release even if it isn't newer: to reinstall, or to go back to an older one. "
+      "Empty = the latest. <a href='https://github.com/" GH_REPO "/releases' target='_blank' style='color:#00BCD4'>"
+      "All releases</a></label>"
+      "<input type='text' name='ver' placeholder='latest, or e.g. 3.19' pattern='[0-9]+(\\.[0-9]+)*'>"
+      "<label><a href='/firmware.bin' style='color:#00BCD4'>Download the running firmware (v" FW_VERSION ")</a> "
+      "or the <a href='https://github.com/" GH_REPO "/releases/latest/download/" GH_ASSET "' style='color:#00BCD4'>"
+      "latest release</a> as a <i>.bin</i> - to keep, or to upload above.</label>"
+      "</fieldset>"
+      "<button type='submit'>Install from GitHub</button>"
       "</form>"
       "<form method='POST' action='/restore' enctype='multipart/form-data'>"
       "<fieldset><legend>Backup</legend>"
@@ -2051,6 +2066,10 @@ enum { GH_IDLE, GH_CHECKING, GH_UP_TO_DATE, GH_AVAILABLE, GH_INSTALLING, GH_FAIL
 static volatile uint8_t gh_state = GH_IDLE;
 static volatile bool gh_check_request = false;
 static volatile bool gh_install_request = false;
+// From the setup page: install a release even when it isn't newer -
+// gh_force_version, or the latest when empty.
+static volatile bool gh_force_request = false;
+static char gh_force_version[16] = "";
 static volatile bool gh_needs_ui_refresh = false;
 static char gh_latest[16] = "";
 static char gh_error[48] = "";
@@ -2070,6 +2089,25 @@ void gh_progress(int done, int total)
 // network_task side: run whatever the UI asked for.
 void gh_update_maintain()
 {
+  if (gh_force_request)
+  {
+    gh_force_request = false;
+    char v[sizeof(gh_latest)];
+    if (gh_force_version[0]) strlcpy(v, gh_force_version, sizeof(v));
+    else if (!gh_latest_version(v, sizeof(v)))
+    {
+      snprintf(gh_error, sizeof(gh_error), "Couldn't reach GitHub");
+      gh_state = GH_FAILED;
+      gh_needs_ui_refresh = true;
+      return;
+    }
+    Serial.printf("[Update] forced install of %s from the setup page\n", v);
+    memcpy(gh_latest, v, sizeof(gh_latest));
+    gh_state = GH_AVAILABLE; // the install below runs on the next pass
+    gh_install_request = true;
+    gh_needs_ui_refresh = true;
+    return;
+  }
   if (gh_install_request && gh_state != GH_AVAILABLE) gh_install_request = false; // stale tap
   // Scheduled checks: not in the first minutes after boot (every widget
   // fetches then, and internal RAM is tight), once a day, sooner again
@@ -2293,6 +2331,62 @@ void handle_restore_done()
   }
 }
 
+// Setup page: install a GitHub release even when it isn't newer (or an
+// older one). The download and flashing run on network_task.
+void handle_gh_install()
+{
+  if (!web_auth()) return;
+  String v = config_server.arg("ver");
+  v.trim();
+  bool ok = v.length() < sizeof(gh_force_version);
+  for (size_t i = 0; ok && i < v.length(); i++) ok = isdigit((unsigned char)v[i]) || v[i] == '.';
+  if (!ok)
+  {
+    config_server.send(400, "text/plain", "Version: digits and dots only, e.g. 3.19");
+    return;
+  }
+  strlcpy(gh_force_version, v.c_str(), sizeof(gh_force_version));
+  gh_force_request = true;
+  String msg = v.length() ? "v" + v : String("the latest release");
+  config_server.send(200, "text/html",
+                     "<html><body style='background:#121212;color:#fff;font-family:sans-serif;text-align:center;padding-top:60px'>"
+                     "<h2 style='color:#00BCD4'>Installing " + msg + "</h2><p>From GitHub: the screen goes black for "
+                     "about 90 seconds, then the device restarts. If it can't, the Settings screen says why.</p></body></html>");
+}
+
+// Setup page: the firmware this board is running, as a .bin (the app
+// image only, as the GitHub release has it - ready to upload again).
+void handle_firmware_download()
+{
+  if (!web_auth()) return;
+  const esp_partition_t *part = esp_ota_get_running_partition();
+  esp_image_metadata_t meta = {};
+  esp_partition_pos_t pos = {};
+  if (part) pos = {part->address, part->size};
+  // PSRAM first: internal RAM is tight (see the TLS notes).
+  uint8_t *buf = (uint8_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+  if (!buf) buf = (uint8_t *)malloc(4096);
+  if (!part || !buf || esp_image_get_metadata(&pos, &meta) != ESP_OK || meta.image_len == 0 || meta.image_len > part->size)
+  {
+    free(buf);
+    config_server.send(500, "text/plain", "Can't read the running firmware");
+    return;
+  }
+  config_server.sendHeader("Content-Disposition", "attachment; filename=\"ESP32-4848S040-v" FW_VERSION ".ino.bin\"");
+  config_server.setContentLength(meta.image_len);
+  config_server.send(200, "application/octet-stream", "");
+  WiFiClient client = config_server.client();
+  for (uint32_t off = 0; off < meta.image_len && client.connected();)
+  {
+    uint32_t n = min((uint32_t)4096, meta.image_len - off);
+    if (esp_partition_read(part, off, buf, n) != ESP_OK) break;
+    if (client.write(buf, n) != n) break;
+    off += n;
+    esp_task_wdt_reset();
+  }
+  free(buf);
+}
+
 // The setup page runs on both networks: the setup AP (open to whoever has
 // its Wi-Fi password, plus the captive-portal tricks below) and, once the
 // board is on your Wi-Fi, http://dashboard.local or its IP - there behind
@@ -2309,6 +2403,8 @@ void start_config_server()
   config_server.on("/backup", HTTP_GET, handle_backup);
   config_server.on("/restore", HTTP_POST, handle_restore_done, handle_restore_upload);
   config_server.on("/update", HTTP_POST, handle_update_done, handle_update_upload);
+  config_server.on("/ghinstall", HTTP_POST, handle_gh_install);
+  config_server.on("/firmware.bin", HTTP_GET, handle_firmware_download);
   config_server.on("/scan", handle_scan);
   config_server.on("/save", HTTP_POST, handle_save_post);
   config_server.on("/notify", HTTP_POST, handle_notify);
@@ -3351,6 +3447,7 @@ lv_obj_t *create_home_screen()
     if (child != home_bambu_badge && child != home_proxmox_badge && child != next_card) make_click_through(child);
   }
   make_click_through(next_accent);
+  home_slot_cards_clickable(); // weather_slot.ino: media / voicemail / call cards open their screens
   lv_obj_add_flag(next_card, LV_OBJ_FLAG_GESTURE_BUBBLE);
   lv_obj_add_event_cb(next_card, home_next_clicked_cb, LV_EVENT_SHORT_CLICKED, NULL);
 

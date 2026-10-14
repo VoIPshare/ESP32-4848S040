@@ -1,6 +1,7 @@
 // ==================== Home: the humidity / wind / UV slot ====================
 // The stats row under the weather shares its place with two cards:
-//  - an incoming call (asterisk.ino), for CALL_SHOW_MS, ahead of everything;
+//  - an incoming call (asterisk.ino), ahead of everything: while it rings,
+//    and CALL_SHOW_AFTER_MS after (CALL_SHOW_MAX_MS at most; a tap hides it);
 //  - what's playing on Jellyfin (jellyfin.ino) and new voicemails
 //    (asterisk.ino), taking turns with the stats every SLOT_SWAP_MS while
 //    there's something to show.
@@ -9,15 +10,17 @@
 // weather panel instead: the number as big as the clock, the name above it.
 // (Named weather_slot so it's merged after asterisk.ino and jellyfin.ino.)
 
-#define CALL_SHOW_MS (15UL * 1000UL)
+#define CALL_SHOW_AFTER_MS (30UL * 1000UL)
+#define CALL_SHOW_MAX_MS (2UL * 60UL * 1000UL)
 #define SLOT_SWAP_MS (20UL * 1000UL)
 
 static lv_obj_t *home_call_card = NULL, *home_call_name = NULL, *home_call_sub = NULL;
 static lv_obj_t *home_media_card = NULL, *home_media_icon = NULL, *home_media_title = NULL, *home_media_who = NULL,
-                *home_media_pct = NULL, *home_media_bar = NULL;
+                *home_media_pct = NULL, *home_media_bar = NULL, *home_media_btn = NULL, *home_media_btn_lab = NULL;
 static lv_obj_t *home_vm_card = NULL, *home_vm_count = NULL, *home_vm_from = NULL;
 static lv_obj_t *home_call_big = NULL, *home_call_big_name = NULL, *home_call_big_num = NULL;
-static uint32_t call_shown_ms = 0;
+static lv_obj_t *vm_icon = NULL, *vm_icon_lab = NULL; // every screen, next to the Wi-Fi icon
+static uint32_t call_shown_ms = 0, call_ringing_ms = 0; // when it started / was last seen ringing
 static bool call_showing = false;
 static bool media_playing = false;
 static bool vm_waiting = false;
@@ -72,15 +75,30 @@ void build_home_slot_cards(lv_obj_t *parent)
   lv_obj_set_style_text_font(home_media_icon, &lv_font_ui_20, LV_PART_MAIN);
   lv_obj_set_style_text_color(home_media_icon, COLOR_PRIMARY, LV_PART_MAIN);
   lv_obj_align(home_media_icon, LV_ALIGN_LEFT_MID, 18, -2);
-  home_media_title = slot_label(home_media_card, &lv_font_ui_20, lv_color_hex(0xFFFFFF), 52, 7, 372);
-  home_media_who = slot_label(home_media_card, &lv_font_ui_14, COLOR_TEXT_MUTED, 52, 35, 310);
+  home_media_title = slot_label(home_media_card, &lv_font_ui_20, lv_color_hex(0xFFFFFF), 52, 7, 320);
+  home_media_who = slot_label(home_media_card, &lv_font_ui_14, COLOR_TEXT_MUTED, 52, 35, 262);
   home_media_pct = lv_label_create(home_media_card);
   lv_obj_set_style_text_font(home_media_pct, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(home_media_pct, COLOR_PRIMARY, LV_PART_MAIN);
-  lv_obj_align(home_media_pct, LV_ALIGN_TOP_RIGHT, -16, 35);
+  lv_obj_align(home_media_pct, LV_ALIGN_TOP_RIGHT, -66, 35);
+  // Play/pause of that stream; the rest of the card opens the Jellyfin screen.
+  home_media_btn = lv_obj_create(home_media_card);
+  lv_obj_set_size(home_media_btn, 44, 44);
+  lv_obj_align(home_media_btn, LV_ALIGN_RIGHT_MID, -10, -3);
+  lv_obj_set_style_radius(home_media_btn, 12, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(home_media_btn, lv_color_hex(0x34424F), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(home_media_btn, lv_color_hex(0x46596A), LV_PART_MAIN | LV_STATE_PRESSED);
+  lv_obj_set_style_border_width(home_media_btn, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(home_media_btn, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(home_media_btn, LV_OBJ_FLAG_SCROLLABLE);
+  home_media_btn_lab = lv_label_create(home_media_btn);
+  lv_label_set_text(home_media_btn_lab, LV_SYMBOL_PAUSE);
+  lv_obj_set_style_text_font(home_media_btn_lab, &lv_font_ui_20, LV_PART_MAIN);
+  lv_obj_set_style_text_color(home_media_btn_lab, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_center(home_media_btn_lab);
   home_media_bar = lv_bar_create(home_media_card);
-  lv_obj_set_size(home_media_bar, 408, 3);
-  lv_obj_align(home_media_bar, LV_ALIGN_BOTTOM_MID, 0, -5);
+  lv_obj_set_size(home_media_bar, 366, 3);
+  lv_obj_align(home_media_bar, LV_ALIGN_BOTTOM_LEFT, 16, -5);
   lv_bar_set_range(home_media_bar, 0, 100);
   lv_obj_set_style_bg_color(home_media_bar, lv_color_hex(0x3A4652), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(home_media_bar, LV_OPA_COVER, LV_PART_MAIN);
@@ -128,13 +146,27 @@ void build_home_slot_cards(lv_obj_t *parent)
   lv_obj_set_style_text_align(home_call_big_num, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_long_mode(home_call_big_num, LV_LABEL_LONG_WRAP);
 
+  // New voicemail: an envelope and the count on the top layer, left of the
+  // Wi-Fi icon, so it shows on every screen.
+  vm_icon = make_pill(lv_layer_top(), "", COLOR_SECONDARY, lv_color_hex(0x2B1600), &vm_icon_lab);
+  lv_obj_align(vm_icon, LV_ALIGN_TOP_RIGHT, -50, 8);
+  lv_obj_clear_flag(vm_icon, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(vm_icon, LV_OBJ_FLAG_HIDDEN);
+
   lv_timer_create(weather_slot_tick, 500, NULL);
 }
 
 // Shows exactly one of the stats row, the call card and the media card.
 static void weather_slot_tick(lv_timer_t *t)
 {
-  if (call_showing && millis() - call_shown_ms > CALL_SHOW_MS) call_showing = false;
+  if (call_showing)
+  {
+    data_lock();
+    bool ringing = call_log_count && call_log[0].status == CALL_RINGING;
+    data_unlock();
+    if (ringing) call_ringing_ms = millis();
+    if (millis() - call_ringing_ms > CALL_SHOW_AFTER_MS || millis() - call_shown_ms > CALL_SHOW_MAX_MS) call_showing = false;
+  }
   lv_obj_t *want = home_weather_stats;
   if (call_showing) want = home_call_card;
   else
@@ -209,7 +241,7 @@ void home_call_apply()
   }
   else lv_obj_add_flag(home_call_big_num, LV_OBJ_FLAG_HIDDEN);
   data_unlock();
-  call_shown_ms = millis();
+  call_shown_ms = call_ringing_ms = millis();
   call_showing = true;
   // Wake a dimmed screen (night dimming / night clock), like a touch would.
   last_activity_ms = millis();
@@ -229,6 +261,7 @@ void home_media_apply()
     JfSession &s = jf.s[0]; // a playing one comes first
     uint8_t pct = s.run_s ? (uint8_t)(s.pos_s * 100ULL / s.run_s) : 0;
     lv_label_set_text(home_media_icon, s.paused ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+    lv_label_set_text(home_media_btn_lab, s.paused ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
     lv_label_set_text(home_media_title, s.title);
     if (jf.count > 1) lv_label_set_text_fmt(home_media_who, "%s  +%d", s.who, jf.count - 1);
     else lv_label_set_text(home_media_who, s.who);
@@ -245,6 +278,11 @@ void home_vm_apply()
   if (!home_vm_card) return;
   data_lock();
   vm_waiting = vm_new_total > 0;
+  if (vm_icon)
+  {
+    lv_label_set_text_fmt(vm_icon_lab, LV_SYMBOL_ENVELOPE " %d", vm_new_total);
+    (vm_waiting ? lv_obj_clear_flag : lv_obj_add_flag)(vm_icon, LV_OBJ_FLAG_HIDDEN);
+  }
   if (vm_waiting)
   {
     if (vm_new_total == 1) lv_label_set_text(home_vm_count, tr(S_VM_ONE));
@@ -274,4 +312,42 @@ void home_vm_apply()
   }
   data_unlock();
   weather_slot_tick(NULL);
+}
+
+static void slot_open_screen_cb(lv_event_t *e)
+{
+  jump_to_screen((uint8_t)(uintptr_t)lv_event_get_user_data(e));
+}
+
+// A tap on the big caller ID hides it.
+static void slot_call_dismiss_cb(lv_event_t *e)
+{
+  call_showing = false;
+  weather_slot_tick(NULL);
+}
+
+static void slot_play_pause_cb(lv_event_t *e)
+{
+  lv_label_set_text(home_media_btn_lab, "...");
+  jf_play_pause_first();
+}
+
+// From create_home_screen(), after it made the whole weather panel
+// click-through (a tap there opens the Forecast): taps on these cards
+// open their own screen instead, and the play/pause button works.
+void home_slot_cards_clickable()
+{
+  struct { lv_obj_t *card; uint8_t screen; } cards[] = {
+      {home_media_card, JF_SCREEN_INDEX}, {home_vm_card, PHONE_SCREEN_INDEX}, {home_call_card, PHONE_SCREEN_INDEX}};
+  for (auto &c : cards)
+  {
+    lv_obj_add_flag(c.card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(c.card, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(c.card, slot_open_screen_cb, LV_EVENT_SHORT_CLICKED, (void *)(uintptr_t)c.screen);
+  }
+  lv_obj_add_flag(home_call_big, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(home_call_big, slot_call_dismiss_cb, LV_EVENT_SHORT_CLICKED, NULL);
+  lv_obj_add_flag(home_media_btn, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(home_media_btn, LV_OBJ_FLAG_GESTURE_BUBBLE);
+  lv_obj_add_event_cb(home_media_btn, slot_play_pause_cb, LV_EVENT_SHORT_CLICKED, NULL);
 }

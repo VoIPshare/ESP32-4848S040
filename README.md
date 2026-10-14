@@ -21,7 +21,7 @@ More in the [Gallery](#gallery).
 | Packages (up to 5) | [PKGE](https://business.pkge.net) | PKGE API key | every 2 hours |
 | Home Assistant (up to 8 entities, tap to toggle) | [Home Assistant](https://www.home-assistant.io/) REST API | address, long-lived token, entity IDs | every 10 s while showing, 5 min otherwise |
 | Flight on the Home strip (optional live status) | calendar titles, [AeroDataBox](https://rapid.aerodatabox.com) via RapidAPI | RapidAPI key (optional) | every 30 min on the day, 10 min around departure/landing |
-| Caller ID on Home, 15 s in place of humidity / wind / UV; new voicemails and who left the last one, in turn with the weather | [Asterisk](https://www.asterisk.org/) Manager Interface (AMI, TCP 5038) | manager host, AMI user/secret, extensions (optional) | live (`DialBegin`, `MessageWaiting` events) |
+| Caller ID on Home while it rings and 30 s after, in place of humidity / wind / UV; new voicemails (envelope with the count on every screen) and who left the last one | [Asterisk](https://www.asterisk.org/) Manager Interface (AMI, TCP 5038) | manager host, AMI user/secret, extensions (optional) | live (`DialBegin`, `MessageWaiting` events) |
 | Jellyfin now playing on Home, alternating with humidity / wind / UV every 20 s | [Jellyfin](https://jellyfin.org/) `/Sessions` API | address, API key | every 20 s |
 
 Flights in your calendar (titles like `AC871 YUL->YYZ`, `TS399 PUJ->YUL` or anything containing "flight") are pinned on the Home strip from 24 hours before departure, with a countdown. With an AeroDataBox key the strip also shows delays, gate, "In the air" and "Landed".
@@ -156,7 +156,7 @@ Use the corners or swipe left/right to move between them (see [Navigation](#navi
 10. **Phone** (Asterisk): only once it's set up; the AMI connection state, voicemail (new and old, who left the last one and when) and the last 6 calls to your extensions (answered, missed, busy) with a call-back button: your first extension rings, then it dials the number
 11. **Jellyfin**: only once it's set up; up to 2 streams with title, who/where, progress and previous / play-pause / next / stop (for clients that allow remote control), plus the library counts
 
-On Home, the humidity / wind / UV row takes turns every 20 s with what's playing on Jellyfin and new voicemails, when there are any; a ringing call replaces it for 15 s, or, with **Big caller ID** (setup page, Asterisk section), covers the whole weather area: the caller's name, and the number as big as the clock. North American numbers show as `514 555-1234`.
+On Home, the humidity / wind / UV row takes turns every 20 s with what's playing on Jellyfin and new voicemails, when there are any; a ringing call replaces it while it rings and for 30 s after (a tap hides it), or, with **Big caller ID** (setup page, Asterisk section), covers the whole weather area: the caller's name, and the number as big as the clock. North American numbers show as `514 555-1234`. While there are new voicemails, an orange envelope with the count sits next to the Wi-Fi icon on every screen. Tap the Jellyfin card for the Jellyfin screen (its button plays / pauses), the voicemail or call card for the Phone screen.
 
 ## Settings screen
 
@@ -237,6 +237,7 @@ Then in an automation: `action: rest_command.dashboard_message` with `data: {mes
 
 - **From GitHub (on the device):** the device checks the latest release of this repository once a day. Depending on the setup page choice it shows a green icon on Home (tap it, then **Install** or **Skip** this version), installs by itself, or does nothing until you press **Check update** in Settings. Downloads are checked against pinned root certificates, so only files really coming from GitHub are accepted.
 - **From the browser:** on the setup page, pick the `ESP32S3-4848S040-ESP32-4848S040.ino.bin` file from a release (not the `merged` one) and press **Upload firmware**.
+- **Forced, from the setup page:** **Install from GitHub** installs the latest release even if it's the version already running, or the version you type (e.g. `3.19`, to go back). The same section downloads the running firmware (`/firmware.bin`) or the latest release as a `.bin`.
 - **By USB:** as in [Installation](#installation), or flash the `merged` file at address 0 with esptool.
 
 The screen shows "Updating firmware - the screen will go black for about 90 seconds" for a few seconds, then stays black until the display restarts with the new version. Writing the flash makes this panel flicker whatever it shows, so the backlight stays off meanwhile. Settings are kept.

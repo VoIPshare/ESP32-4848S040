@@ -1,8 +1,8 @@
 // ==================== Asterisk (AMI): caller ID, voicemail, Phone screen ====================
 // Keeps a TCP connection open to the Asterisk Manager Interface and
 // watches DialBegin events: when a phone starts ringing (only the
-// extensions listed on the setup page, if any), Home shows the caller for
-// 15 s in place of humidity / wind / UV (weather_slot.ino). DialEnd says
+// extensions listed on the setup page, if any), Home shows the caller in
+// place of humidity / wind / UV while it rings and 30 s after (weather_slot.ino). DialEnd says
 // how it ended, for the recent calls on the Phone screen.
 //
 // Voicemail: MessageWaiting events keep the message counts of the watched

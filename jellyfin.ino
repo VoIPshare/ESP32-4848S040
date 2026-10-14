@@ -3,7 +3,9 @@
 // screen shows, 20 s otherwise); while something is playing, Home
 // alternates humidity / wind / UV with it (weather_slot.ino). The Jellyfin
 // screen shows up to JF_SHOWN streams with previous / play-pause / next /
-// stop, and the library counts. Needs the server address and an API key
+// stop (always shown: servers report SupportsRemoteControl false for some
+// players that do obey, e.g. the Fire TV app; a refused command shows on
+// the screen), and the library counts. Needs the server address and an API key
 // (Dashboard -> API Keys).
 //
 // Fetching and commands run on network_task (jf_maintain()); the result is
@@ -21,7 +23,7 @@ struct JfSession
   char title[96]; // "Series - Episode", "Artist - Song", "Movie (2019)"
   char who[64];   // "user - device"
   uint32_t pos_s, run_s;
-  bool paused, can_control;
+  bool paused;
 };
 struct JfState
 {
@@ -39,6 +41,10 @@ static volatile bool jf_ui_refresh = false;
 static uint32_t last_jf_fetch_ms = 0, last_jf_counts_ms = 0;
 static volatile int jf_cmd_session = -1; // set by a control tap, done by network_task
 static const char *volatile jf_cmd = NULL;
+// Last command's answer (204 = done), shown on the screen for JF_CMD_NOTE_MS.
+#define JF_CMD_NOTE_MS (10UL * 1000UL)
+static int jf_cmd_code = 0;
+static uint32_t jf_cmd_ms = 0;
 
 bool jf_configured()
 {
@@ -103,7 +109,6 @@ static void jf_fill_session(JfSession &out, JsonObject s)
   out.run_s = (uint32_t)((item["RunTimeTicks"] | 0.0) / 1e7);
   out.pos_s = (uint32_t)((s["PlayState"]["PositionTicks"] | 0.0) / 1e7);
   out.paused = s["PlayState"]["IsPaused"] | false;
-  out.can_control = s["SupportsRemoteControl"] | false;
 }
 
 static void jf_fetch()
@@ -121,7 +126,6 @@ static void jf_fetch()
   f["Id"] = true;
   f["UserName"] = true;
   f["DeviceName"] = true;
-  f["SupportsRemoteControl"] = true;
   f["NowPlayingItem"]["Name"] = true;
   f["NowPlayingItem"]["Type"] = true;
   f["NowPlayingItem"]["SeriesName"] = true;
@@ -176,6 +180,8 @@ void jf_maintain()
     data_unlock();
     int code = jf_request(path, true, NULL, NULL);
     Serial.printf("[Jellyfin] %s: HTTP %d\n", cmd, code);
+    jf_cmd_code = code;
+    jf_cmd_ms = millis();
     delay(400); // let the client act before reading it back
     jf_fetch();
     return;
@@ -213,10 +219,14 @@ void jf_apply_to_ui()
   else if (jf.http == 0) lv_label_set_text(jf_status_lab, "Connecting...");
   else if (jf.http == 401) lv_label_set_text(jf_status_lab, "API key refused (HTTP 401)");
   else if (jf.http != 200) lv_label_set_text_fmt(jf_status_lab, "Can't reach the server (%d)", jf.http);
+  else if (jf_cmd_ms && millis() - jf_cmd_ms < JF_CMD_NOTE_MS && jf_cmd_code != 200 && jf_cmd_code != 204)
+    lv_label_set_text_fmt(jf_status_lab, "Command refused (%d) - the player may not allow remote control", jf_cmd_code);
   else if (jf.count > JF_SHOWN) lv_label_set_text_fmt(jf_status_lab, "%d streams  \xE2\x80\xA2  %d more not shown", jf.count, jf.count - JF_SHOWN);
   else if (jf.count) lv_label_set_text_fmt(jf_status_lab, "%d stream%s", jf.count, jf.count == 1 ? "" : "s");
   else lv_label_set_text(jf_status_lab, "Connected");
-  lv_obj_set_style_text_color(jf_status_lab, jf.http == 200 || jf.http == 0 ? COLOR_TEXT_MUTED : lv_color_hex(0xEF5350), LV_PART_MAIN);
+  bool cmd_failed = jf_cmd_ms && millis() - jf_cmd_ms < JF_CMD_NOTE_MS && jf_cmd_code != 200 && jf_cmd_code != 204;
+  lv_obj_set_style_text_color(jf_status_lab, (jf.http == 200 || jf.http == 0) && !cmd_failed ? COLOR_TEXT_MUTED : lv_color_hex(0xEF5350),
+                              LV_PART_MAIN);
 
   for (int i = 0; i < JF_SHOWN; i++)
   {
@@ -236,7 +246,6 @@ void jf_apply_to_ui()
     else lv_label_set_text_fmt(jf_card_time[i], "%s%s", s.paused ? "Paused  \xE2\x80\xA2  " : "", pos);
     lv_bar_set_value(jf_card_bar[i], s.run_s ? (int)(s.pos_s * 100ULL / s.run_s) : 0, LV_ANIM_OFF);
     lv_label_set_text(jf_card_play[i], s.paused ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
-    (s.can_control ? lv_obj_clear_flag : lv_obj_add_flag)(jf_card_ctrl[i], LV_OBJ_FLAG_HIDDEN);
   }
   (jf.count || jf.http != 200 ? lv_obj_add_flag : lv_obj_clear_flag)(jf_empty_lab, LV_OBJ_FLAG_HIDDEN);
 
@@ -247,6 +256,13 @@ void jf_apply_to_ui()
     else lv_label_set_text(jf_count_val[k], "-");
   }
   data_unlock();
+}
+
+// Play/pause of the first stream (Home's card).
+void jf_play_pause_first()
+{
+  jf_cmd = "PlayPause";
+  jf_cmd_session = 0;
 }
 
 // user_data: session index * 4 + control (0 previous, 1 play/pause, 2 next, 3 stop).
