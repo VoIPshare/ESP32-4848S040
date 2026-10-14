@@ -56,6 +56,18 @@ static lv_obj_t *slot_label(lv_obj_t *card, const lv_font_t *font, lv_color_t co
 
 static void weather_slot_tick(lv_timer_t *t);
 
+// Called with data_lock() held or before network_task runs.
+static void vm_icon_update()
+{
+  if (!vm_icon) return;
+  if (vm_new_total > 0) lv_label_set_text_fmt(vm_icon_lab, LV_SYMBOL_ENVELOPE " %d", vm_new_total);
+  else if (vm_counts != VM_KNOWN && !vm_box_count) lv_label_set_text(vm_icon_lab, LV_SYMBOL_ENVELOPE " ?");
+  else lv_label_set_text(vm_icon_lab, LV_SYMBOL_ENVELOPE);
+  bool lit = vm_new_total > 0;
+  lv_obj_set_style_bg_color(vm_icon, lit ? COLOR_SECONDARY : lv_color_hex(0x34424F), LV_PART_MAIN);
+  lv_obj_set_style_text_color(vm_icon_lab, lit ? lv_color_hex(0x2B1600) : lv_color_hex(0xB0BEC5), LV_PART_MAIN);
+}
+
 // From create_home_screen(), right after the stats row.
 void build_home_slot_cards(lv_obj_t *parent)
 {
@@ -146,12 +158,14 @@ void build_home_slot_cards(lv_obj_t *parent)
   lv_obj_set_style_text_align(home_call_big_num, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_long_mode(home_call_big_num, LV_LABEL_LONG_WRAP);
 
-  // New voicemail: an envelope and the count on the top layer, left of the
-  // Wi-Fi icon, so it shows on every screen.
+  // Voicemail: an envelope on the top layer, left of the Wi-Fi icon, on
+  // every screen while Asterisk is set up - grey when there's nothing new,
+  // orange with the count, "?" while the counts aren't known.
   vm_icon = make_pill(lv_layer_top(), "", COLOR_SECONDARY, lv_color_hex(0x2B1600), &vm_icon_lab);
   lv_obj_align(vm_icon, LV_ALIGN_TOP_RIGHT, -50, 8);
   lv_obj_clear_flag(vm_icon, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_flag(vm_icon, LV_OBJ_FLAG_HIDDEN);
+  if (!ami_configured()) lv_obj_add_flag(vm_icon, LV_OBJ_FLAG_HIDDEN);
+  vm_icon_update();
 
   lv_timer_create(weather_slot_tick, 500, NULL);
 }
@@ -278,11 +292,7 @@ void home_vm_apply()
   if (!home_vm_card) return;
   data_lock();
   vm_waiting = vm_new_total > 0;
-  if (vm_icon)
-  {
-    lv_label_set_text_fmt(vm_icon_lab, LV_SYMBOL_ENVELOPE " %d", vm_new_total);
-    (vm_waiting ? lv_obj_clear_flag : lv_obj_add_flag)(vm_icon, LV_OBJ_FLAG_HIDDEN);
-  }
+  vm_icon_update();
   if (vm_waiting)
   {
     if (vm_new_total == 1) lv_label_set_text(home_vm_count, tr(S_VM_ONE));

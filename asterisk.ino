@@ -6,10 +6,11 @@
 // how it ended, for the recent calls on the Phone screen.
 //
 // Voicemail: MessageWaiting events keep the message counts of the watched
-// mailboxes (the extensions, in context "default" unless written
-// "101@other"); when a message is left, the event comes on the caller's
-// channel, so it also says who left it. MailboxCount after the login
-// fills in the counts from before the boot.
+// mailboxes (the extensions' numbers in any context, or exactly
+// "101@other" when written so; every mailbox when none are set); when a
+// message is left, the event comes on the caller's channel, so it also says
+// who left it. VoicemailUsersList after the login and every AMI_VM_POLL_MS
+// fills in the counts from before the boot and anything missed.
 //
 // Call back (Phone screen): Originate rings the first watched extension
 // through Local/<ext>@<context>, then dials the number in <context>.
@@ -20,7 +21,7 @@
 //   deny = 0.0.0.0/0.0.0.0
 //   permit = 192.168.1.0/255.255.255.0
 //   read = call
-//   write = reporting,originate   ; MailboxCount, and Originate for call back
+//   write = reporting,originate   ; VoicemailUsersList, and Originate for call back
 //
 // The connection runs on network_task (ami_maintain()); everything the UI
 // reads is copied under data_lock() and shown from loop().
@@ -31,6 +32,7 @@
 #define AMI_PING_MS (60UL * 1000UL)
 #define AMI_SILENT_MS (3 * AMI_PING_MS) // nothing back for this long: reconnect
 #define AMI_NOTE_MS (10UL * 1000UL)     // "Calling back..." on the Phone screen
+#define AMI_VM_POLL_MS (5UL * 60UL * 1000UL)
 #define CALL_LOG_MAX 6
 
 static WiFiClient ami;
@@ -46,6 +48,7 @@ static struct
   char uid[40], cid_num[32], cid_name[48];
   char dest_chan[64], dest_num[32], dest_exten[32], dial_status[16];
   char mailbox[48], new_msgs[8], old_msgs[8];
+  char vm_box[24], vm_context[24]; // VoicemailUserEntry
 } ami_ev;
 
 // Connection state, for the Phone screen.
@@ -78,6 +81,10 @@ static volatile int ami_callback_req = -1; // index into call_log, set by a tap
 static struct { char box[48]; int new_count, old_count; } vm_box[VM_MAX_BOXES];
 static int vm_box_count = 0;
 static int vm_new_total = 0, vm_old_total = 0;
+enum { VM_UNKNOWN, VM_KNOWN, VM_REFUSED };
+static uint8_t vm_counts = VM_UNKNOWN;
+static char vm_note[80] = ""; // why the counts are unknown
+static uint32_t ami_last_vm_poll_ms = 0;
 static char vm_last_number[32] = "", vm_last_name[48] = "";
 static time_t vm_last_time = 0;
 static volatile bool vm_ui_refresh = false;
@@ -203,7 +210,8 @@ static void ami_ext_mailbox(const char *ext, char *out, size_t n)
   else snprintf(out, n, "%s@default", ext);
 }
 
-// Every mailbox when no extensions are set.
+// Every mailbox when no extensions are set. "101" (or "PJSIP/101")
+// matches mailbox 101 in any context, "101@office" only that one.
 static bool ami_mailbox_watched(const char *box)
 {
   const char *p = settings.ami_ext;
@@ -213,20 +221,20 @@ static bool ami_mailbox_watched(const char *box)
   {
     ami_ext_mailbox(ext, mb, sizeof(mb));
     if (!strcasecmp(mb, box)) return true;
+    if (strchr(ext, '@')) continue;
+    char num[32];
+    ami_ext_number(ext, num, sizeof(num));
+    size_t n = strlen(num);
+    if (n && !strncmp(box, num, n) && (box[n] == '@' || box[n] == '\0')) return true;
   }
   return false;
 }
 
-// Asks for the watched mailboxes' counts (right after the login).
+// Asks for every mailbox's counts (answered with VoicemailUserEntry events).
 static void ami_ask_mailboxes()
 {
-  const char *p = settings.ami_ext;
-  char ext[48], mb[48];
-  while (ami_next_ext(p, ext, sizeof(ext)))
-  {
-    ami_ext_mailbox(ext, mb, sizeof(mb));
-    ami.printf("Action: MailboxCount\r\nActionID: mbx\r\nMailbox: %s\r\n\r\n", mb);
-  }
+  ami_last_vm_poll_ms = millis();
+  ami.print("Action: VoicemailUsersList\r\nActionID: vml\r\n\r\n");
 }
 
 // A mailbox's counts changed; from_* is who just left a message (if known).
@@ -254,6 +262,7 @@ static void vm_update(const char *box, int new_count, int old_count, const char 
   }
   vm_box[i].new_count = new_count;
   vm_box[i].old_count = old_count;
+  if (vm_counts == VM_UNKNOWN) vm_counts = VM_KNOWN;
   vm_new_total = vm_old_total = 0;
   for (int k = 0; k < vm_box_count; k++)
   {
@@ -347,10 +356,22 @@ static void ami_response_done()
       ami_next_try_ms = millis() + AMI_AUTH_RETRY_MS;
     }
   }
-  else if (!strcmp(ami_ev.action_id, "mbx"))
+  else if (!strcmp(ami_ev.action_id, "vml"))
   {
-    if (ok) vm_update(ami_ev.mailbox, atoi(ami_ev.new_msgs), atoi(ami_ev.old_msgs), NULL, NULL);
-    else Serial.printf("[AMI] MailboxCount: %s (write = reporting?)\n", ami_ev.message);
+    data_lock();
+    if (ok)
+    {
+      vm_counts = VM_KNOWN;
+      vm_note[0] = '\0';
+    }
+    else
+    {
+      vm_counts = VM_REFUSED;
+      snprintf(vm_note, sizeof(vm_note), "Can't read voicemail: %s - add write = reporting", ami_ev.message);
+      Serial.printf("[AMI] %s\n", vm_note);
+    }
+    data_unlock();
+    vm_ui_refresh = true;
   }
   else if (!strcmp(ami_ev.action_id, "cb"))
   {
@@ -371,6 +392,12 @@ static void ami_event_done()
     bool from = !ami_blank(ami_ev.cid_num);
     vm_update(ami_ev.mailbox, atoi(ami_ev.new_msgs), atoi(ami_ev.old_msgs), from ? ami_ev.cid_num : NULL,
               from && !ami_blank(ami_ev.cid_name) ? ami_ev.cid_name : NULL);
+  }
+  else if (!strcmp(ami_ev.event, "VoicemailUserEntry"))
+  {
+    char box[48];
+    snprintf(box, sizeof(box), "%s@%s", ami_ev.vm_box, ami_ev.vm_context[0] ? ami_ev.vm_context : "default");
+    if (ami_mailbox_watched(box)) vm_update(box, atoi(ami_ev.new_msgs), atoi(ami_ev.old_msgs), NULL, NULL);
   }
   else if (!strcmp(ami_ev.event, "DialBegin") && ami_ext_match()) ami_dial_begin();
   else if (!strcmp(ami_ev.event, "DialEnd")) ami_dial_end();
@@ -403,8 +430,10 @@ static void ami_line_done()
       {"Mailbox", ami_ev.mailbox, sizeof(ami_ev.mailbox)},
       {"New", ami_ev.new_msgs, sizeof(ami_ev.new_msgs)},         // MessageWaiting
       {"Old", ami_ev.old_msgs, sizeof(ami_ev.old_msgs)},
-      {"NewMessages", ami_ev.new_msgs, sizeof(ami_ev.new_msgs)}, // MailboxCount
-      {"OldMessages", ami_ev.old_msgs, sizeof(ami_ev.old_msgs)},
+      {"NewMessageCount", ami_ev.new_msgs, sizeof(ami_ev.new_msgs)}, // VoicemailUserEntry
+      {"OldMessageCount", ami_ev.old_msgs, sizeof(ami_ev.old_msgs)},
+      {"VoiceMailbox", ami_ev.vm_box, sizeof(ami_ev.vm_box)},
+      {"VMContext", ami_ev.vm_context, sizeof(ami_ev.vm_context)},
   };
   for (auto &f : fields)
     if (!strcmp(key, f.key)) strlcpy(f.dst, val, f.n);
@@ -498,6 +527,7 @@ void ami_maintain()
     ami.stop();
     ami_next_try_ms = millis();
   }
+  else if (ami_logged_in && millis() - ami_last_vm_poll_ms > AMI_VM_POLL_MS) ami_ask_mailboxes();
   else if (ami_logged_in && millis() - ami_last_ping_ms > AMI_PING_MS)
   {
     ami_last_ping_ms = millis();
@@ -581,9 +611,11 @@ void phone_apply_to_ui()
   }
   else
   {
-    lv_label_set_text(phone_vm_count, vm_old_total ? "No new voicemail" : "No voicemail");
+    lv_label_set_text(phone_vm_count, vm_counts != VM_KNOWN && !vm_box_count ? "Voicemail: unknown"
+                                      : vm_old_total                       ? "No new voicemail"
+                                                                           : "No voicemail");
     if (vm_old_total) lv_label_set_text_fmt(phone_vm_from, "%d old message%s", vm_old_total, vm_old_total == 1 ? "" : "s");
-    else lv_label_set_text(phone_vm_from, "");
+    else lv_label_set_text(phone_vm_from, vm_note[0] ? vm_note : vm_counts == VM_UNKNOWN ? "Asking Asterisk..." : "");
   }
   lv_obj_set_style_bg_color(phone_vm_card, vm_new_total ? lv_color_hex(0x3A2A12) : COLOR_BG_LIGHT, LV_PART_MAIN);
 
