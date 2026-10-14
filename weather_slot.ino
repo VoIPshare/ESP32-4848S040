@@ -239,8 +239,8 @@ void home_call_apply()
     bool na = len == 12 && big[3] == ' ' && big[7] == '-';
     if (na) big[3] = '\n'; // "514\n555-1234"
     bool large = na || len <= 8;
-    lv_obj_set_style_text_font(home_call_big_num, large ? &lv_font_roboto_regular_90 : &lv_font_roboto_regular_56, LV_PART_MAIN);
-    lv_obj_set_style_text_line_space(home_call_big_num, large ? 6 : 0, LV_PART_MAIN);
+    lv_obj_set_style_text_font(home_call_big_num, large ? &lv_font_roboto_medium_90 : &lv_font_roboto_regular_56, LV_PART_MAIN);
+    lv_obj_set_style_text_line_space(home_call_big_num, large ? 20 : 0, LV_PART_MAIN);
     lv_label_set_text(home_call_big_num, big);
     lv_obj_clear_flag(home_call_big_num, LV_OBJ_FLAG_HIDDEN);
   }

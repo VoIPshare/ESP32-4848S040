@@ -280,7 +280,7 @@ npx lv_font_conv --no-compress --no-prefilter --bpp 4 --size 16 --font Montserra
 
 Then change its include to plain `#include "lvgl.h"`.
 
-The big numbers are Roboto subsets made the same way (`--font Roboto-Bold.ttf` / `Roboto-Regular.ttf --size N --bpp 4 --symbols "..." --no-kerning --no-compress`): the Home clock (`lv_font_roboto_bold_126`, Bold, `0123456789:`), the night clock (`lv_font_roboto_bold_136`), the temperature and the Big caller ID number (`lv_font_roboto_regular_90`, Regular, `0123456789:°CF-+ `), and long international numbers (`lv_font_roboto_regular_56`, `0123456789-+ `). Characters that dip below the baseline, like brackets, would make the line taller and move the temperature down, so they're left out.
+The big numbers are Roboto subsets made the same way (`--font Roboto-Bold.ttf` / `Roboto-Regular.ttf --size N --bpp 4 --symbols "..." --no-kerning --no-compress`): the Home clock (`lv_font_roboto_bold_126`, Bold, `0123456789:`), the night clock (`lv_font_roboto_bold_136`), the temperature and the Big caller ID number (`lv_font_roboto_medium_90`, Medium, `0123456789:°CF-+ `), and long international numbers (`lv_font_roboto_regular_56`, `0123456789-+ `). Characters that dip below the baseline, like brackets, would make the line taller and move the temperature down, so they're left out.
 
 ## Data flow
 

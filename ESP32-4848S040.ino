@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.27"
+#define FW_VERSION "3.28"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -61,11 +61,11 @@
 // before it's declared.
 enum WeatherIconType { WICON_CLEAR, WICON_PARTLY_CLOUDY, WICON_CLOUDY, WICON_FOG, WICON_DRIZZLE, WICON_RAIN, WICON_SNOW, WICON_THUNDER };
 
-// Big numbers in Roboto Regular: 90 px (0-9 : ° C F - + space) for the
-// weather temperature and the Big caller ID number, 56 px (0-9 - + space)
-// for long international numbers. The clocks are Roboto Bold (0-9 :).
+// Big numbers: Roboto Medium 90 px (0-9 : ° C F - + space) for the weather
+// temperature and the Big caller ID number, Roboto Regular 56 px (0-9 - +
+// space) for long international numbers. The clocks are Roboto Bold (0-9 :).
 extern "C" {
-extern const lv_font_t lv_font_roboto_regular_90, lv_font_roboto_regular_56;
+extern const lv_font_t lv_font_roboto_medium_90, lv_font_roboto_regular_56;
 // UI text: LVGL's built-in Montserrat (same file, same symbols) plus Latin-1
 // accents and typographic quotes, for Italian/French and accented titles.
 // Made with lv_font_conv - see the README.
@@ -1212,7 +1212,7 @@ static volatile bool weather_needs_ui_refresh = false;
 
 void weather_apply_to_ui()
 {
-  // lv_font_roboto_regular_90 has 0-9 : ° C F and '-' (below zero).
+  // lv_font_roboto_medium_90 has 0-9 : ° C F and '-' (below zero).
   if (weather_temp_lab) lv_label_set_text_fmt(weather_temp_lab, "%.0f\xC2\xB0" "C", weather_data.temp);
   if (weather_desc_lab) lv_label_set_text(weather_desc_lab, wmo_weather_desc(weather_data.wcode));
   if (weather_extra_lab)
@@ -3468,7 +3468,7 @@ lv_obj_t *create_home_screen()
   lv_obj_t *temp = lv_label_create(weather_panel);
   lv_label_set_text(temp, "24°C");
   lv_obj_set_style_text_color(temp, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-  lv_obj_set_style_text_font(temp, &lv_font_roboto_regular_90, LV_PART_MAIN);
+  lv_obj_set_style_text_font(temp, &lv_font_roboto_medium_90, LV_PART_MAIN);
   lv_obj_align(temp, LV_ALIGN_TOP_RIGHT, -24, 24);
   weather_temp_lab = temp;
 
