@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.29"
+#define FW_VERSION "3.30"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -237,7 +237,7 @@ static uint16_t crash_count = 0;
 // the Bambu screen because a print just auto-opened it - that case instead
 // gets its own 5-min-after-finish return, and neither applies while
 // screen_pinned.
-#define BAMBU_AUTO_FINISH_RETURN_MS (5UL * 60UL * 1000UL)
+#define BAMBU_AUTO_SHOW_MS (10UL * 1000UL) // the Bambu screen at a print's start and end, then Home
 static bool bambu_screen_auto_opened = false;
 static uint32_t bambu_auto_return_home_at_ms = 0; // 0 = not scheduled
 
@@ -521,9 +521,8 @@ void clock_tick_cb(lv_timer_t *timer)
     }
   }
 
-  // If the Bambu screen was auto-opened for a print and that print has since
-  // finished, return to Home 5 minutes after the finish instead of waiting
-  // on the (suppressed) inactivity timeout above.
+  // The Bambu screen was auto-opened at a print's start or end: back to Home
+  // after BAMBU_AUTO_SHOW_MS instead of the (suppressed) inactivity timeout.
   if (!screen_pinned && bambu_auto_return_home_at_ms != 0 && millis() >= bambu_auto_return_home_at_ms)
   {
     bambu_auto_return_home_at_ms = 0;
@@ -3647,7 +3646,7 @@ lv_obj_t *create_settings_screen()
   lv_obj_clear_flag(abos_row, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t *abos_title = lv_label_create(abos_row);
-  lv_label_set_text(abos_title, "Show Bambu screen on print start");
+  lv_label_set_text(abos_title, "Show Bambu screen at print start/end");
   lv_obj_set_style_text_color(abos_title, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
   lv_obj_set_style_text_font(abos_title, &lv_font_ui_14, LV_PART_MAIN);
   lv_obj_align(abos_title, LV_ALIGN_TOP_LEFT, 0, 0);

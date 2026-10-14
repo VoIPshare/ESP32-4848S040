@@ -2,9 +2,10 @@
 // The stats row under the weather shares its place with two cards:
 //  - an incoming call (asterisk.ino), ahead of everything: while it rings,
 //    and CALL_SHOW_AFTER_MS after (CALL_SHOW_MAX_MS at most; a tap hides it);
-//  - what's playing on Jellyfin (jellyfin.ino), taking turns with the stats
-//    every SLOT_SWAP_MS while something plays.
-// Only one of the three shows at a time; weather_slot_tick() picks it.
+//  - what's playing on Jellyfin (jellyfin.ino) and the print in progress
+//    (bambu.ino), taking turns with the stats every SLOT_SWAP_MS while
+//    there's something to show.
+// Only one shows at a time; weather_slot_tick() picks it.
 // Voicemail has its own envelope on every screen (top-right), not a card here.
 // With "Big caller ID" (setup page) a ringing call covers the whole
 // weather panel instead: the number in big digits, the name above it.
@@ -17,6 +18,9 @@
 static lv_obj_t *home_call_card = NULL, *home_call_name = NULL, *home_call_sub = NULL;
 static lv_obj_t *home_media_card = NULL, *home_media_icon = NULL, *home_media_title = NULL, *home_media_who = NULL,
                 *home_media_pct = NULL, *home_media_bar = NULL, *home_media_btn = NULL, *home_media_btn_lab = NULL;
+static lv_obj_t *home_print_card = NULL, *home_print_name = NULL, *home_print_sub = NULL, *home_print_pct = NULL,
+                *home_print_bar = NULL;
+static bool print_running = false;
 static lv_obj_t *home_call_big = NULL, *home_call_big_name = NULL, *home_call_big_num = NULL;
 static lv_obj_t *vm_icon = NULL, *vm_icon_lab = NULL; // every screen, next to the Wi-Fi icon
 static uint32_t call_shown_ms = 0, call_ringing_ms = 0; // when it started / was last seen ringing
@@ -111,6 +115,29 @@ void build_home_slot_cards(lv_obj_t *parent)
   lv_obj_set_style_radius(home_media_bar, 2, LV_PART_MAIN);
   lv_obj_set_style_radius(home_media_bar, 2, LV_PART_INDICATOR);
 
+  // Printing: printer icon, printer name, job and time left, percent, progress.
+  home_print_card = slot_card(parent, lv_color_hex(0x2E2418));
+  lv_obj_t *pimg = lv_img_create(home_print_card);
+  lv_img_set_src(pimg, &home_icon_printer);
+  lv_obj_set_style_img_recolor(pimg, COLOR_SECONDARY, LV_PART_MAIN);
+  lv_obj_set_style_img_recolor_opa(pimg, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_align(pimg, LV_ALIGN_LEFT_MID, 12, -2);
+  home_print_name = slot_label(home_print_card, &lv_font_ui_20, lv_color_hex(0xFFFFFF), 52, 7, 290);
+  home_print_sub = slot_label(home_print_card, &lv_font_ui_14, COLOR_TEXT_MUTED, 52, 35, 290);
+  home_print_pct = lv_label_create(home_print_card);
+  lv_obj_set_style_text_font(home_print_pct, &lv_font_ui_28, LV_PART_MAIN);
+  lv_obj_set_style_text_color(home_print_pct, COLOR_SECONDARY, LV_PART_MAIN);
+  lv_obj_align(home_print_pct, LV_ALIGN_RIGHT_MID, -16, -3);
+  home_print_bar = lv_bar_create(home_print_card);
+  lv_obj_set_size(home_print_bar, 408, 3);
+  lv_obj_align(home_print_bar, LV_ALIGN_BOTTOM_MID, 0, -5);
+  lv_bar_set_range(home_print_bar, 0, 100);
+  lv_obj_set_style_bg_color(home_print_bar, lv_color_hex(0x4A3A28), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(home_print_bar, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(home_print_bar, COLOR_SECONDARY, LV_PART_INDICATOR);
+  lv_obj_set_style_radius(home_print_bar, 2, LV_PART_MAIN);
+  lv_obj_set_style_radius(home_print_bar, 2, LV_PART_INDICATOR);
+
   // Big caller ID: the whole weather panel, everything centered.
   home_call_big = lv_obj_create(parent);
   lv_obj_set_size(home_call_big, 480, 300);
@@ -178,7 +205,15 @@ static void weather_slot_tick(lv_timer_t *t)
   }
   lv_obj_t *want = home_weather_stats;
   if (call_showing) want = home_call_card;
-  else if (media_playing && (millis() / SLOT_SWAP_MS) % 2) want = home_media_card;
+  else
+  {
+    // The stats, then whichever of print / media has something, in turn.
+    lv_obj_t *turns[3] = {home_weather_stats};
+    int n = 1;
+    if (print_running) turns[n++] = home_print_card;
+    if (media_playing) turns[n++] = home_media_card;
+    want = turns[(millis() / SLOT_SWAP_MS) % n];
+  }
   if (call_showing && settings.call_big)
   {
     if (lv_obj_has_flag(home_call_big, LV_OBJ_FLAG_HIDDEN))
@@ -189,7 +224,7 @@ static void weather_slot_tick(lv_timer_t *t)
     want = home_weather_stats; // underneath, for when it goes
   }
   else if (home_call_big && !lv_obj_has_flag(home_call_big, LV_OBJ_FLAG_HIDDEN)) lv_obj_add_flag(home_call_big, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_t *all[] = {home_weather_stats, home_call_card, home_media_card};
+  lv_obj_t *all[] = {home_weather_stats, home_call_card, home_media_card, home_print_card};
   for (lv_obj_t *o : all)
   {
     if (!o) continue;
@@ -304,7 +339,7 @@ static void slot_play_pause_cb(lv_event_t *e)
 void home_slot_cards_clickable()
 {
   struct { lv_obj_t *card; uint8_t screen; } cards[] = {
-      {home_media_card, JF_SCREEN_INDEX}, {home_call_card, PHONE_SCREEN_INDEX}};
+      {home_media_card, JF_SCREEN_INDEX}, {home_call_card, PHONE_SCREEN_INDEX}, {home_print_card, 1}};
   for (auto &c : cards)
   {
     lv_obj_add_flag(c.card, LV_OBJ_FLAG_CLICKABLE);
@@ -316,4 +351,26 @@ void home_slot_cards_clickable()
   lv_obj_add_flag(home_media_btn, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(home_media_btn, LV_OBJ_FLAG_GESTURE_BUBBLE);
   lv_obj_add_event_cb(home_media_btn, slot_play_pause_cb, LV_EVENT_SHORT_CLICKED, NULL);
+}
+
+// From bambu_apply_to_ui() (loop()): the printer sent new data.
+void home_print_apply()
+{
+  if (!home_print_card) return;
+  const char *st = bambu.gcode_state;
+  print_running = !strcmp(st, "RUNNING") || !strcmp(st, "PREPARE") || !strcmp(st, "PAUSE");
+  if (print_running)
+  {
+    lv_label_set_text(home_print_name, bambu_live_product_name[0] ? bambu_live_product_name : settings.printer_name);
+    char sub[96];
+    if (!strcmp(st, "PREPARE")) snprintf(sub, sizeof(sub), "%s", tr(S_PREPARING));
+    else if (!strcmp(st, "PAUSE")) snprintf(sub, sizeof(sub), "Paused \xE2\x80\xA2 %s", bambu.job_name);
+    else if (bambu.remain_time_min > 0)
+      snprintf(sub, sizeof(sub), "%dh %02dm left \xE2\x80\xA2 %s", bambu.remain_time_min / 60, bambu.remain_time_min % 60, bambu.job_name);
+    else snprintf(sub, sizeof(sub), "%s", bambu.job_name);
+    lv_label_set_text(home_print_sub, sub);
+    lv_label_set_text_fmt(home_print_pct, "%d%%", bambu.percent);
+    lv_bar_set_value(home_print_bar, constrain(bambu.percent, 0, 100), LV_ANIM_OFF);
+  }
+  weather_slot_tick(NULL);
 }

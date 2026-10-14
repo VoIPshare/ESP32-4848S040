@@ -156,7 +156,7 @@ Use the corners or swipe left/right to move between them (see [Navigation](#navi
 10. **Phone** (Asterisk): only once it's set up; the AMI connection state, voicemail (new and old, who left the last one and when) and the last 6 calls to your extensions (answered, missed, busy) with a call-back button: your first extension rings, then it dials the number
 11. **Jellyfin**: only once it's set up; up to 2 streams with title, who/where, progress and previous / play-pause / next / stop (for clients that allow remote control), plus the library counts
 
-On Home, the humidity / wind / UV row takes turns every 20 s with what's playing on Jellyfin, when something plays; a ringing call replaces it while it rings and for 30 s after (a tap hides it), or, with **Big caller ID** (setup page, Asterisk section), covers the whole weather area: the caller's name, and the number in big digits. North American numbers show as `514 555-1234`. While there are new voicemails, an orange envelope with the count shows in the top-right corner of every screen (in the Wi-Fi icon's place while that one is hidden, next to it otherwise). If the counts can't be read, the Phone screen says why. Tap the Jellyfin card for the Jellyfin screen (its button plays / pauses), the call card for the Phone screen.
+On Home, the humidity / wind / UV row takes turns every 20 s with the print in progress (printer, job, time left, percent; tap for the Bambu screen) and what's playing on Jellyfin, when there's one; a ringing call replaces it while it rings and for 30 s after (a tap hides it), or, with **Big caller ID** (setup page, Asterisk section), covers the whole weather area: the caller's name, and the number in big digits. North American numbers show as `514 555-1234`. While there are new voicemails, an orange envelope with the count shows in the top-right corner of every screen (in the Wi-Fi icon's place while that one is hidden, next to it otherwise). If the counts can't be read, the Phone screen says why. Tap the Jellyfin card for the Jellyfin screen (its button plays / pauses), the call card for the Phone screen.
 
 ## Settings screen
 
@@ -165,7 +165,7 @@ Hold the top-right corner for 5 seconds. Top right shows the firmware version an
 | Control | What it does |
 | --- | --- |
 | **Setup Access Point** | Starts the setup Wi-Fi network and web page (see below). |
-| **Show Bambu screen on print start** | Jumps to the Bambu screen when a print starts. |
+| **Show Bambu screen at print start/end** | Shows the Bambu screen for 10 s when a print starts and when it ends, then goes back Home. |
 | **Show Flight screen on changes** | Shows the Flight screen for 2 minutes when its data changes. |
 | **Auto-hide Wi-Fi icon** | On: the icon shows only on Home, for 20 seconds. Off: always, on every screen. |
 | **Return to Home after** | 1, 2, 5 or 10 minutes without a touch. |

@@ -394,12 +394,19 @@ void bambu_apply_to_ui()
     ph_record(bambu.job_name, true);
     bambu_finish_badge_until_ms = millis() + BAMBU_FINISH_BADGE_MS;
     start_finish_screen_flash();
-    // If we're showing the Bambu screen because this print auto-opened it,
-    // don't wait on inactivity to leave - return to Home 5 min after finish.
-    if (bambu_screen_auto_opened) bambu_auto_return_home_at_ms = millis() + BAMBU_AUTO_FINISH_RETURN_MS;
+    // The Bambu screen for BAMBU_AUTO_SHOW_MS at the end too (setting-gated),
+    // then Home.
+    if (settings.auto_show_bambu_on_start && !in_settings && !screen_pinned)
+    {
+      if (current_screen != 1) go_to_screen_blackout(1);
+      bambu_screen_auto_opened = true;
+      bambu_auto_return_home_at_ms = millis() + BAMBU_AUTO_SHOW_MS;
+    }
   }
 
-  // Auto-open the Bambu screen on a genuine print start (setting-gated).
+  // Auto-open the Bambu screen for BAMBU_AUTO_SHOW_MS on a genuine print
+  // start (setting-gated), then back to Home - Home's printing card
+  // (weather_slot.ino) shows the progress from there.
   // Same reboot guard as the finish badge above: requiring !was_printing_ish
   // AND percent < 1 rules out "we just reconnected mid-print" (which would
   // otherwise look identical to a fresh start on the very first message
@@ -411,12 +418,13 @@ void bambu_apply_to_ui()
   {
     go_to_screen_blackout(1);
     bambu_screen_auto_opened = true;
-    bambu_auto_return_home_at_ms = 0;
+    bambu_auto_return_home_at_ms = millis() + BAMBU_AUTO_SHOW_MS;
   }
 
   strncpy(bambu_prev_gcode_state, bambu.gcode_state, sizeof(bambu_prev_gcode_state) - 1);
   bambu_prev_gcode_state[sizeof(bambu_prev_gcode_state) - 1] = '\0';
   update_home_bambu_badge();
+  home_print_apply(); // weather_slot.ino
 
   if (bambu_pname_lab)
     lv_label_set_text_fmt(bambu_pname_lab, "%s  " LV_SYMBOL_LIST, bambu_live_product_name[0] ? bambu_live_product_name : settings.printer_name);
