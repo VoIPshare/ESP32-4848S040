@@ -32,6 +32,7 @@ enum LangKey
   S_TRK_CHECKING, S_TRK_NO_INFO, S_TRK_TRANSIT, S_TRK_PICKUP, S_TRK_DELIVERED, S_TRK_NOT_DELIVERED,
   S_TRK_ERROR, S_TRK_PREPARING, S_TRK_ENDED, S_UNKNOWN,
   S_NO_PACKAGES,
+  S_INCOMING_CALL, S_VM_ONE, S_VM_MANY, S_VM_FROM,
   S_COUNT
 };
 
@@ -101,6 +102,10 @@ static const char *const LANG_STR[S_COUNT][LANG_COUNT] = {
     {"Route ended", "Tracciamento finito", "Suivi termin\xC3\xA9"},
     {"Unknown", "Sconosciuto", "Inconnu"},
     {"No packages being tracked", "Nessun pacco in tracciamento", "Aucun colis suivi"},
+    {"Incoming call", "Chiamata in arrivo", "Appel entrant"},
+    {"1 new voicemail", "1 nuovo messaggio vocale", "1 nouveau message vocal"},
+    {"%d new voicemails", "%d nuovi messaggi vocali", "%d nouveaux messages vocaux"},
+    {"Last from", "Ultimo da", "Dernier de"},
 };
 
 static inline const char *tr(LangKey k) { return LANG_STR[k][ui_lang < LANG_COUNT ? ui_lang : 0]; }

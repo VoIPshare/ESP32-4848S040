@@ -21,6 +21,8 @@ More in the [Gallery](#gallery).
 | Packages (up to 5) | [PKGE](https://business.pkge.net) | PKGE API key | every 2 hours |
 | Home Assistant (up to 8 entities, tap to toggle) | [Home Assistant](https://www.home-assistant.io/) REST API | address, long-lived token, entity IDs | every 10 s while showing, 5 min otherwise |
 | Flight on the Home strip (optional live status) | calendar titles, [AeroDataBox](https://rapid.aerodatabox.com) via RapidAPI | RapidAPI key (optional) | every 30 min on the day, 10 min around departure/landing |
+| Caller ID on Home, 15 s in place of humidity / wind / UV; new voicemails and who left the last one, in turn with the weather | [Asterisk](https://www.asterisk.org/) Manager Interface (AMI, TCP 5038) | manager host, AMI user/secret, extensions (optional) | live (`DialBegin`, `MessageWaiting` events) |
+| Jellyfin now playing on Home, alternating with humidity / wind / UV every 20 s | [Jellyfin](https://jellyfin.org/) `/Sessions` API | address, API key | every 20 s |
 
 Flights in your calendar (titles like `AC871 YUL->YYZ`, `TS399 PUJ->YUL` or anything containing "flight") are pinned on the Home strip from 24 hours before departure, with a countdown. With an AeroDataBox key the strip also shows delays, gate, "In the air" and "Landed".
 
@@ -149,6 +151,10 @@ Use the corners or swipe left/right to move between them (see [Navigation](#navi
 7. **Packages**: up to 5 PKGE parcels with status and estimated delivery
 8. **Flight**: only while a calendar flight is coming up or in progress
 9. **Home Assistant**: only once it's set up; up to 8 entities as tiles, lit when on. Lights, switches, fans, input booleans, automations and scripts toggle with a tap
+10. **Phone** (Asterisk): only once it's set up; the AMI connection state, voicemail (new and old, who left the last one and when) and the last 6 calls to your extensions (answered, missed, busy) with a call-back button: your first extension rings, then it dials the number
+11. **Jellyfin**: only once it's set up; up to 2 streams with title, who/where, progress and previous / play-pause / next / stop (for clients that allow remote control), plus the library counts
+
+On Home, the humidity / wind / UV row takes turns every 20 s with what's playing on Jellyfin and new voicemails, when there are any; a ringing call replaces it for 15 s, or, with **Big caller ID** (setup page, Asterisk section), covers the whole weather area: the caller's name, and the number as big as the clock. North American numbers show as `514 555-1234`.
 
 ## Settings screen
 
@@ -190,6 +196,8 @@ Saving restarts the device.
 | **AeroDataBox API key** | Optional. Free key: rapidapi.com → AeroDataBox → Basic plan. Empty keeps the saved key, `-` removes it. |
 | **Home Assistant** | Address (`http://homeassistant.local:8123`), a long-lived access token (your HA profile → Security), and up to 8 entity IDs, comma separated: `light.desk, switch.fan, sensor.outdoor_temperature`. Empty token keeps the saved one, `-` removes it. |
 | **Proxmox cluster** | Host as `ip:port` (8006), API token ID (`user@realm!name`) and secret. A read-only PVEAuditor token is enough. |
+| **Asterisk caller ID** | Manager host (`192.168.1.10` or `192.168.1.10:5038`), AMI user and secret, and optionally the extensions to watch (`101, 102` or `PJSIP/101`; empty = every call). Their mailboxes are watched too, in context `default` (write `101@office` for another context). Dial context: where call back dials (`from-internal` on FreePBX). In `/etc/asterisk/manager.conf` the user needs `read = call` and `write = reporting,originate` (voicemail counts, and call back), plus `deny`/`permit` for your LAN. Empty secret keeps the saved one, `-` removes it. |
+| **Jellyfin** | Address (`http://192.168.1.20:8096`) and an API key (Dashboard → API Keys). Empty key keeps the saved one, `-` removes it. |
 | **Screenshots** | *Allow screenshots without login* (off by default). See [Screenshots](#screenshots). |
 | **Firmware update** | Upload a `.ino.bin` file to update from the browser. |
 | **Backup** | *Download all settings* saves them as a JSON file (with your passwords and keys, so keep it private). Pick that file and press **Restore settings** to load it back, e.g. after a full re-flash or on a second display. |
@@ -332,8 +340,9 @@ network_task (core 0)                         loop() (core 1, LVGL)
 ```
 ESP32-4848S040/
 ├── ESP32-4848S040.ino          ← Main sketch (upload this): display, Home, settings, Wi-Fi portal, network task
-├── bambu.ino / calendar.ino / proxmox.ino / stocks.ino / makerworld.ino / tracking.ino / flight.ino / homeassistant.ino  ← one tab per screen (calendar.ino also has the Agenda)
+├── bambu.ino / calendar.ino / proxmox.ino / stocks.ino / makerworld.ino / tracking.ino / flight.ino / homeassistant.ino / asterisk.ino / jellyfin.ino  ← one tab per screen (calendar.ino also has the Agenda)
 ├── forecast.ino                 ← Forecast page
+├── weather_slot.ino             ← Home: humidity / wind / UV row shared with calls, voicemail and Jellyfin
 ├── alerts.ino / screensaver.ino ← alert banner, night clock
 ├── web_fetch.ino                ← schedules the direct fetches and copies results into the screens
 ├── direct_fetch.cpp/.h          ← Open-Meteo geocoding, Yahoo, iCal parser, MakerWorld, PKGE, AeroDataBox

@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.17"
+#define FW_VERSION "3.20"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -78,10 +78,11 @@ LV_FONT_DECLARE(lv_font_ui_28);
 
 // Bigger, bold digits-and-colon-only Roboto for the Home clock.
 extern const lv_font_t lv_font_roboto_bold_136;
+extern const lv_font_t lv_font_roboto_bold_96, lv_font_roboto_bold_56; // digits ( ) - + only: phone numbers
 // Home screen shortcut icons (Material Design Icons) - see home_icons.c /
 // tools/make_home_icons.py.
 extern const lv_img_dsc_t home_icon_home, home_icon_printer, home_icon_calendar, home_icon_server, home_icon_stocks,
-    home_icon_makerworld, home_icon_package, home_icon_flight, home_icon_pin, home_icon_ha,
+    home_icon_makerworld, home_icon_package, home_icon_flight, home_icon_pin, home_icon_ha, home_icon_phone, home_icon_jellyfin,
     wx_icon_sunny, wx_icon_night, wx_icon_partly, wx_icon_cloudy, wx_icon_fog, wx_icon_rain, wx_icon_pouring,
     wx_icon_snow, wx_icon_storm;
 }
@@ -159,11 +160,13 @@ static lv_disp_drv_t disp_drv;
 #define COLOR_CLOUD lv_color_hex(0xECEFF1)
 
 // Screens: Home, Bambu printer, Calendar, Proxmox, Stocks, MakerWorld,
-// Packages, Flight, Home Assistant. Flight is only in the swipe sequence
-// while a flight is coming up, Home Assistant only once it's set up - see
-// screen_available().
-#define SCREEN_COUNT 9
+// Packages, Flight, Home Assistant, Phone (Asterisk), Jellyfin. Flight is
+// only in the swipe sequence while a flight is coming up, the last three
+// only once they're set up - see screen_available().
+#define SCREEN_COUNT 11
 #define HA_SCREEN_INDEX 8
+#define PHONE_SCREEN_INDEX 9
+#define JF_SCREEN_INDEX 10
 #define FLIGHT_SCREEN_INDEX 7
 static lv_obj_t *screens[SCREEN_COUNT];
 static uint8_t current_screen = 0;
@@ -205,6 +208,7 @@ static lv_obj_t *weather_extra_lab = NULL; // "Feels like 15° - H 19° L 9°"
 static lv_obj_t *weather_humidity_val = NULL;
 static lv_obj_t *weather_wind_val = NULL;
 static lv_obj_t *weather_uv_val = NULL;
+static lv_obj_t *home_weather_stats = NULL; // humidity / wind / UV row - swapped out by weather_slot.ino
 
 // Page-position dots (see create_page_indicator()) auto-hide after idle.
 static lv_obj_t *page_dots_row = NULL;
@@ -419,6 +423,18 @@ struct DeviceSettings
   char proxmox_host[64] = "";
   char proxmox_token_id[64] = "";
   char proxmox_token_secret[40] = "";
+  // Asterisk caller ID (asterisk.ino): manager host ("ip" or "ip:port",
+  // default 5038), a manager.conf user with read = call, and optionally
+  // the extensions to watch ("101,102"; empty = every call).
+  char ami_host[64] = "";
+  char ami_user[32] = "";
+  char ami_secret[64] = "";
+  char ami_ext[48] = "";
+  char ami_context[32] = "from-internal"; // dialplan context for "call back" (Originate)
+  bool call_big = false; // a ringing call covers the whole weather panel, number as big as the clock
+  // Jellyfin (jellyfin.ino): server address and an API key (Dashboard -> API Keys).
+  char jf_url[96] = "";
+  char jf_key[48] = "";
 };
 static DeviceSettings settings;
 
@@ -659,6 +675,8 @@ bool screen_available(uint8_t idx)
 {
   if (idx == FLIGHT_SCREEN_INDEX) return flight_screen_active();
   if (idx == HA_SCREEN_INDEX) return ha_configured();
+  if (idx == PHONE_SCREEN_INDEX) return ami_configured();
+  if (idx == JF_SCREEN_INDEX) return jf_configured();
   return idx < SCREEN_COUNT;
 }
 
@@ -832,6 +850,7 @@ lv_obj_t *make_shortcut_btn(lv_obj_t *parent, const lv_img_dsc_t *icon, lv_color
   lv_img_set_src(img, icon);
   lv_obj_set_style_img_recolor(img, color, LV_PART_MAIN);
   lv_obj_set_style_img_recolor_opa(img, LV_OPA_COVER, LV_PART_MAIN);
+  if (size < 36) lv_img_set_zoom(img, 256 * (size - 6) / 30); // the icons are 30 px, made for 36 px buttons
   lv_obj_center(img);
   lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
   return btn;
@@ -841,7 +860,7 @@ struct ShortcutDef { const lv_img_dsc_t *icon; uint8_t screen; };
 static const ShortcutDef SHORTCUTS[] = {
     {&home_icon_home, 0}, {&home_icon_printer, 1}, {&home_icon_calendar, 2}, {&home_icon_server, 3},
     {&home_icon_stocks, 4}, {&home_icon_makerworld, 5}, {&home_icon_package, 6}, {&home_icon_flight, FLIGHT_SCREEN_INDEX},
-    {&home_icon_ha, HA_SCREEN_INDEX}};
+    {&home_icon_ha, HA_SCREEN_INDEX}, {&home_icon_phone, PHONE_SCREEN_INDEX}, {&home_icon_jellyfin, JF_SCREEN_INDEX}};
 #define SHORTCUT_COUNT (sizeof(SHORTCUTS) / sizeof(SHORTCUTS[0]))
 
 // Jump menu on the always-on-top layer: an invisible top-left hotspot, a
@@ -1460,6 +1479,14 @@ void load_settings()
   prefs.getString("pxhost", settings.proxmox_host, sizeof(settings.proxmox_host));
   prefs.getString("pxtok", settings.proxmox_token_id, sizeof(settings.proxmox_token_id));
   prefs.getString("pxsec", settings.proxmox_token_secret, sizeof(settings.proxmox_token_secret));
+  prefs.getString("amihost", settings.ami_host, sizeof(settings.ami_host));
+  prefs.getString("amiuser", settings.ami_user, sizeof(settings.ami_user));
+  prefs.getString("amisec", settings.ami_secret, sizeof(settings.ami_secret));
+  prefs.getString("amiext", settings.ami_ext, sizeof(settings.ami_ext));
+  prefs.getString("amictx", settings.ami_context, sizeof(settings.ami_context));
+  settings.call_big = prefs.getBool("callbig", settings.call_big);
+  prefs.getString("jfurl", settings.jf_url, sizeof(settings.jf_url));
+  prefs.getString("jfkey", settings.jf_key, sizeof(settings.jf_key));
   prefs.end();
 }
 
@@ -1502,6 +1529,14 @@ void save_settings()
   prefs.putString("pxhost", settings.proxmox_host);
   prefs.putString("pxtok", settings.proxmox_token_id);
   prefs.putString("pxsec", settings.proxmox_token_secret);
+  prefs.putString("amihost", settings.ami_host);
+  prefs.putString("amiuser", settings.ami_user);
+  prefs.putString("amisec", settings.ami_secret);
+  prefs.putString("amiext", settings.ami_ext);
+  prefs.putString("amictx", settings.ami_context);
+  prefs.putBool("callbig", settings.call_big);
+  prefs.putString("jfurl", settings.jf_url);
+  prefs.putString("jfkey", settings.jf_key);
   prefs.end();
 }
 
@@ -1755,7 +1790,7 @@ String build_settings_page()
     static const char *const PAGES[][2] = {
         {"home", "Home"}, {"bambu", "Bambu printer"}, {"calendar", "Calendar"}, {"calday", "Calendar - today"},
         {"agenda", "Agenda"}, {"forecast", "Forecast"}, {"proxmox", "Proxmox"}, {"stocks", "Stocks"},
-        {"makerworld", "MakerWorld"}, {"packages", "Packages"}, {"flight", "Flight"}, {"homeassistant", "Home Assistant"},
+        {"makerworld", "MakerWorld"}, {"packages", "Packages"}, {"flight", "Flight"}, {"homeassistant", "Home Assistant"}, {"phone", "Phone (Asterisk)"}, {"jellyfin", "Jellyfin"},
         {"history", "Print history"}, {"settings", "Settings screen"}, {"quick", "Quick panel"}, {"night", "Night clock"}};
     for (auto &pg : PAGES)
     {
@@ -1791,6 +1826,41 @@ String build_settings_page()
       "<label style='margin-top:2px;font-size:11px'>Create a token under Datacenter -&gt; Permissions -&gt; API "
       "Tokens. A PVEAuditor-only token (read-only, \"Privilege Separation\" left on) is enough to show cluster "
       "status here.</label>"
+      "</fieldset>"
+      "<fieldset><legend>Asterisk caller ID (optional)</legend>"
+      "<label>Manager host (ip or ip:port)</label><input type='text' name='amihost' placeholder='192.168.1.10:5038' value='");
+  page += html_escape(settings.ami_host);
+  page += F("'><label>AMI user</label><input type='text' name='amiuser' placeholder='dashboard' value='");
+  page += html_escape(settings.ami_user);
+  page += F("'><label>AMI secret</label><input type='password' name='amisec' autocomplete='off' placeholder='");
+  page += settings.ami_secret[0] ? F("saved - leave empty to keep") : F("not set");
+  page += F("'><label>Extensions to watch (optional, comma separated)</label><input type='text' name='amiext' "
+            "placeholder='101, 102 - empty: every call' value='");
+  page += html_escape(settings.ami_ext);
+  page += F("'><label>Dial context (call back from the Phone screen)</label><input type='text' name='amictx' "
+            "placeholder='from-internal' value='");
+  page += html_escape(settings.ami_context);
+  page += F("'><input type='hidden' name='ami_form' value='1'>"
+            "<label><input type='checkbox' name='callbig' value='1' style='width:auto'");
+  if (settings.call_big) page += F(" checked");
+  page += F(
+      "> Big caller ID: a ringing call fills the whole weather area, the number as big as the clock</label>"
+      "<label style='margin-top:2px;font-size:11px'>A user in <i>/etc/asterisk/manager.conf</i> with "
+      "<i>read = call</i> and <i>write = reporting,originate</i> is enough (originate: only for call back, which "
+      "rings the first extension above, then dials the number). A ringing call shows the caller on Home for 15 s, in place of "
+      "humidity / wind / UV; new voicemails (and who left the last one) take turns there with the weather. "
+      "Mailboxes are the extensions above, in context <i>default</i> (write <i>101@other</i> for another one). "
+      "Enter - as secret to remove it.</label>"
+      "</fieldset>"
+      "<fieldset><legend>Jellyfin (optional)</legend>"
+      "<label>Address</label><input type='text' name='jfurl' placeholder='http://192.168.1.20:8096' value='");
+  page += html_escape(settings.jf_url);
+  page += F("'><label>API key</label><input type='password' name='jfkey' autocomplete='off' placeholder='");
+  page += settings.jf_key[0] ? F("saved - leave empty to keep") : F("not set");
+  page += F(
+      "'>"
+      "<label style='margin-top:2px;font-size:11px'>Dashboard -&gt; API Keys. While something is playing, Home "
+      "alternates humidity / wind / UV with what's playing every 20 s. Enter - as key to remove it.</label>"
       "</fieldset>"
       "<button type='submit'>Save</button>"
       "</form>"
@@ -1869,6 +1939,7 @@ void handle_save_post()
   if (config_server.hasArg("ssid")) config_server.arg("ssid").toCharArray(settings.sta_ssid, sizeof(settings.sta_ssid));
   if (config_server.hasArg("pass")) config_server.arg("pass").toCharArray(settings.sta_pass, sizeof(settings.sta_pass));
   if (config_server.hasArg("shot_form")) settings.shot_open = config_server.hasArg("shotopen");
+  if (config_server.hasArg("ami_form")) settings.call_big = config_server.hasArg("callbig");
   if (config_server.hasArg("lang")) settings.lang = (uint8_t)constrain(config_server.arg("lang").toInt(), 0, LANG_COUNT - 1);
   if (config_server.hasArg("updmode")) settings.update_mode = (uint8_t)constrain(config_server.arg("updmode").toInt(), 0, 2);
   if (config_server.hasArg("ndim_form")) // unchecked boxes aren't sent
@@ -1932,6 +2003,25 @@ void handle_save_post()
   if (config_server.hasArg("pxhost")) config_server.arg("pxhost").toCharArray(settings.proxmox_host, sizeof(settings.proxmox_host));
   if (config_server.hasArg("pxtok")) config_server.arg("pxtok").toCharArray(settings.proxmox_token_id, sizeof(settings.proxmox_token_id));
   if (config_server.hasArg("pxsec")) config_server.arg("pxsec").toCharArray(settings.proxmox_token_secret, sizeof(settings.proxmox_token_secret));
+  // Asterisk and Jellyfin: plain fields are trimmed and stored as typed,
+  // secrets keep the saved value when left empty and are removed with "-".
+  struct { const char *arg; char *dst; size_t n; bool secret; } extra[] = {
+      {"amihost", settings.ami_host, sizeof(settings.ami_host), false},
+      {"amiuser", settings.ami_user, sizeof(settings.ami_user), false},
+      {"amisec", settings.ami_secret, sizeof(settings.ami_secret), true},
+      {"amiext", settings.ami_ext, sizeof(settings.ami_ext), false},
+      {"amictx", settings.ami_context, sizeof(settings.ami_context), false},
+      {"jfurl", settings.jf_url, sizeof(settings.jf_url), false},
+      {"jfkey", settings.jf_key, sizeof(settings.jf_key), true},
+  };
+  for (auto &f : extra)
+  {
+    if (!config_server.hasArg(f.arg)) continue;
+    String v = config_server.arg(f.arg);
+    v.trim();
+    if (f.secret && v == "-") f.dst[0] = '\0';
+    else if (!f.secret || v.length() > 0) v.toCharArray(f.dst, f.n);
+  }
   save_settings();
 
   config_server.send(200, "text/html",
@@ -2285,7 +2375,7 @@ void notify_apply_to_ui()
 // BMP. The page switch runs on the LVGL thread (shot_apply_page() from
 // loop()); this handler waits for it and a few frames before capturing.
 static const char *const SHOT_PAGES[] = {"home", "bambu", "calendar", "proxmox", "stocks", "makerworld", "packages",
-                                         "flight", "homeassistant", "forecast", "agenda", "history", "settings",
+                                         "flight", "homeassistant", "phone", "jellyfin", "forecast", "agenda", "history", "settings",
                                          "quick", "night", "calday"};
 #define SHOT_PAGE_COUNT (sizeof(SHOT_PAGES) / sizeof(SHOT_PAGES[0]))
 static volatile int shot_page_req = -1; // index into SHOT_PAGES, -1 none
@@ -3094,13 +3184,20 @@ lv_obj_t *create_home_screen()
 
   // Shortcut row ("always on Home" mode): one icon per screen, centered
   // between the top-left menu corner (x < 80) and the top-right corner (x > 390).
+  // Up to 8 icons are 36 px, 4 px apart (x 82-398); with Home Assistant,
+  // Phone and Jellyfin all set up there can be 10, so they get smaller
+  // (28 px, 2 px apart: 298 px) to stay clear of the corners.
+  int shortcut_n = 0;
+  for (size_t i = 1; i < SHORTCUT_COUNT; i++)
+    if (SHORTCUTS[i].screen == FLIGHT_SCREEN_INDEX || screen_available(SHORTCUTS[i].screen)) shortcut_n++;
+  lv_coord_t shortcut_size = shortcut_n > 8 ? 28 : 36;
   lv_obj_t *shortcuts = lv_obj_create(scr);
-  lv_obj_set_size(shortcuts, LV_SIZE_CONTENT, 36);
-  lv_obj_align(shortcuts, LV_ALIGN_TOP_MID, 0, 11); // all 8 icons (36 px, 4 px apart): x 82-398
+  lv_obj_set_size(shortcuts, LV_SIZE_CONTENT, shortcut_size);
+  lv_obj_align(shortcuts, LV_ALIGN_TOP_MID, 0, 11 + (36 - shortcut_size) / 2);
   lv_obj_set_style_bg_opa(shortcuts, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(shortcuts, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(shortcuts, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_column(shortcuts, 4, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(shortcuts, shortcut_n > 8 ? 2 : 4, LV_PART_MAIN);
   lv_obj_set_flex_flow(shortcuts, LV_FLEX_FLOW_ROW);
   lv_obj_clear_flag(shortcuts, LV_OBJ_FLAG_SCROLLABLE);
   home_shortcuts_row = shortcuts;
@@ -3109,8 +3206,8 @@ lv_obj_t *create_home_screen()
   {
     bool flight = SHORTCUTS[i].screen == FLIGHT_SCREEN_INDEX;
     lv_obj_t *btn = make_shortcut_btn(shortcuts, SHORTCUTS[i].icon, flight ? COLOR_SECONDARY : COLOR_PRIMARY,
-                                      home_shortcut_clicked_cb, SHORTCUTS[i].screen, 36);
-    if (SHORTCUTS[i].screen == HA_SCREEN_INDEX && !ha_configured()) lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
+                                      home_shortcut_clicked_cb, SHORTCUTS[i].screen, shortcut_size);
+    if (SHORTCUTS[i].screen >= HA_SCREEN_INDEX && !screen_available(SHORTCUTS[i].screen)) lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
     if (flight)
     {
       home_flight_btn = btn;
@@ -3194,6 +3291,7 @@ lv_obj_t *create_home_screen()
   lv_obj_set_flex_flow(stats, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(stats, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_clear_flag(stats, LV_OBJ_FLAG_SCROLLABLE);
+  home_weather_stats = stats;
 
   // Slightly smaller than make_stat_chip()'s default 132x74 - just for
   // this row, via the trailing chip_height param (appended after
@@ -3202,6 +3300,10 @@ lv_obj_t *create_home_screen()
   make_stat_chip(stats, "58%", tr(S_HUMIDITY), COLOR_PRIMARY, &weather_humidity_val, 110, &lv_font_ui_22, LV_FLEX_ALIGN_CENTER, 62);
   make_stat_chip(stats, "12 km/h", tr(S_WIND), COLOR_PRIMARY, &weather_wind_val, 110, &lv_font_ui_22, LV_FLEX_ALIGN_CENTER, 62);
   make_stat_chip(stats, "4", tr(S_UV), COLOR_PRIMARY, &weather_uv_val, 110, &lv_font_ui_22, LV_FLEX_ALIGN_CENTER, 62);
+
+  // Same spot as the stats row: an incoming call (asterisk.ino) and what's
+  // playing on Jellyfin (jellyfin.ino) take turns with it - see weather_slot.ino.
+  build_home_slot_cards(weather_panel);
 
   // Next-event card: the only free space left is the strip below the stats
   // row. A subtle rounded card with a colored accent bar reads better than
@@ -3739,6 +3841,15 @@ void watchdog_start()
   esp_task_wdt_add(NULL); // the calling task: loop() (setup() runs in it)
 }
 
+// Reads the Wi-Fi state for the signal icon (applied from loop()).
+static void wifi_signal_sample()
+{
+  last_wifi_signal_sample_ms = millis();
+  wifi_signal_ui_connected = wifi_connected;
+  wifi_signal_rssi_dbm = wifi_connected ? (int8_t)WiFi.RSSI() : 0;
+  wifi_signal_needs_ui_refresh = true;
+}
+
 void network_task(void *param)
 {
   esp_task_wdt_add(NULL);
@@ -3750,6 +3861,9 @@ void network_task(void *param)
     if (wifi_got_ip)
     {
       wifi_got_ip = false;
+      // The icon first: the fetches below take a while, and until now it
+      // only caught up after all of them.
+      wifi_signal_sample();
       start_config_server();
       static bool mdns_started = false;
       if (!mdns_started && MDNS.begin("dashboard")) // http://dashboard.local
@@ -3784,16 +3898,12 @@ void network_task(void *param)
     if (wifi_connected && millis() - last_weather_fetch_ms > WEATHER_FETCH_INTERVAL_MS) fetch_weather();
     if (wifi_connected) direct_fetch_maintain();
     if (wifi_connected && millis() - last_proxmox_fetch_ms > PROXMOX_FETCH_INTERVAL_MS) proxmox_fetch();
-    if (millis() - last_wifi_signal_sample_ms > WIFI_SIGNAL_SAMPLE_INTERVAL_MS)
-    {
-      last_wifi_signal_sample_ms = millis();
-      wifi_signal_ui_connected = wifi_connected;
-      wifi_signal_rssi_dbm = wifi_connected ? (int8_t)WiFi.RSSI() : 0;
-      wifi_signal_needs_ui_refresh = true;
-    }
+    if (millis() - last_wifi_signal_sample_ms > WIFI_SIGNAL_SAMPLE_INTERVAL_MS) wifi_signal_sample();
     bambu_mqtt_maintain();
     if (wifi_connected && clock_synced_once) gh_update_maintain();
     if (wifi_connected) ha_maintain();
+    if (wifi_connected) ami_maintain();
+    if (wifi_connected) jf_maintain();
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
@@ -3889,6 +3999,8 @@ void setup()
     screens[5] = create_makerworld_screen();
     screens[6] = create_tracking_screen();
     screens[HA_SCREEN_INDEX] = create_ha_screen();
+    screens[PHONE_SCREEN_INDEX] = create_phone_screen();
+    screens[JF_SCREEN_INDEX] = create_jf_screen();
     screens[FLIGHT_SCREEN_INDEX] = create_flight_screen();
     settings_screen = create_settings_screen();
     cal_day_screen = create_calendar_day_screen();
@@ -4095,6 +4207,10 @@ void loop()
   if (wifi_signal_needs_ui_refresh) { wifi_signal_needs_ui_refresh = false; wifi_signal_apply_to_ui(); }
   if (ota_needs_ui_refresh) { ota_needs_ui_refresh = false; ota_apply_to_ui(); }
   if (ha_take_ui_refresh()) ha_apply_to_ui();
+  if (call_take_ui_refresh()) { home_call_apply(); phone_apply_to_ui(); }
+  if (vm_take_ui_refresh()) { home_vm_apply(); phone_apply_to_ui(); }
+  if (ami_take_status_refresh()) phone_apply_to_ui();
+  if (jf_take_ui_refresh()) { home_media_apply(); jf_apply_to_ui(); }
   if (notify_pending) { notify_pending = false; notify_apply_to_ui(); }
   if (shot_page_req >= 0)
   {

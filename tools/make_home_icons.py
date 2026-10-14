@@ -21,6 +21,8 @@ ICONS = [  # (C name, MDI name, codepoint)
     ("home_icon_flight", "airplane", 0xF001D),
     ("home_icon_pin", "pin", 0xF0403),  # "screen pinned" indicator, top-left
     ("home_icon_ha", "home-assistant", 0xF07D0),
+    ("home_icon_phone", "phone", 0xF03F2),
+    ("home_icon_jellyfin", "television-play", 0xF0ECF),
     # Forecast page (forecast.ino)
     ("wx_icon_sunny", "weather-sunny", 0xF0599),
     ("wx_icon_night", "weather-night", 0xF0594),
