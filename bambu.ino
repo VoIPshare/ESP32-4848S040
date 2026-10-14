@@ -239,54 +239,6 @@ float json_as_float(JsonVariantConst v, float fallback)
   return v.as<float>();
 }
 
-// Shows/hides/re-colors the Home screen badge based on current print state
-// and the finished-badge countdown. Called both from bambu_apply_to_ui()
-// (whenever new MQTT data is pushed) and clock_tick_cb()'s 1s tick (purely
-// to notice when the 10-minute finished window has elapsed - a local
-// countdown check, not a re-fetch from the printer).
-void update_home_bambu_badge()
-{
-  bool printing = strcmp(bambu.gcode_state, "RUNNING") == 0 || strcmp(bambu.gcode_state, "PREPARE") == 0;
-  if (printing)
-  {
-    if (home_bambu_badge_lab)
-    {
-      // Progress and time left, e.g. "PRINTING 42% - 1h 05m".
-      if (strcmp(bambu.gcode_state, "RUNNING") == 0 && bambu.remain_time_min > 0)
-        lv_label_set_text_fmt(home_bambu_badge_lab, "%s %d%%  -  %dh %02dm", tr(S_PRINTING), bambu.percent,
-                              bambu.remain_time_min / 60, bambu.remain_time_min % 60);
-      else if (strcmp(bambu.gcode_state, "RUNNING") == 0)
-        lv_label_set_text_fmt(home_bambu_badge_lab, "%s %d%%", tr(S_PRINTING), bambu.percent);
-      else
-        lv_label_set_text(home_bambu_badge_lab, tr(S_PREPARING));
-      lv_obj_set_style_text_color(home_bambu_badge_lab, lv_color_hex(0x2B1600), LV_PART_MAIN);
-    }
-    if (home_bambu_badge)
-    {
-      lv_obj_set_style_bg_color(home_bambu_badge, COLOR_SECONDARY, LV_PART_MAIN);
-      lv_obj_clear_flag(home_bambu_badge, LV_OBJ_FLAG_HIDDEN);
-    }
-  }
-  else if (bambu_finish_badge_until_ms != 0 && millis() < bambu_finish_badge_until_ms)
-  {
-    if (home_bambu_badge_lab)
-    {
-      lv_label_set_text(home_bambu_badge_lab, tr(S_PRINT_FINISHED));
-      lv_obj_set_style_text_color(home_bambu_badge_lab, lv_color_hex(0x0B2E13), LV_PART_MAIN);
-    }
-    if (home_bambu_badge)
-    {
-      lv_obj_set_style_bg_color(home_bambu_badge, COLOR_SUCCESS, LV_PART_MAIN);
-      lv_obj_clear_flag(home_bambu_badge, LV_OBJ_FLAG_HIDDEN);
-    }
-  }
-  else
-  {
-    bambu_finish_badge_until_ms = 0;
-    if (home_bambu_badge) lv_obj_add_flag(home_bambu_badge, LV_OBJ_FLAG_HIDDEN);
-  }
-}
-
 // Pushes the current `bambu` struct onto the on-screen widgets. Must only be
 // called from the LVGL-owning thread (loop(), via bambu_needs_ui_refresh) -
 // bambu_mqtt_callback() and bambu_mqtt_maintain() run on network_task and
@@ -298,17 +250,11 @@ void bambu_apply_to_ui()
     if (bambu_job_lab) lv_label_set_text(bambu_job_lab, "Connection failed - check IP/serial/access code in Settings");
     if (bambu_status_pill_lab) lv_label_set_text(bambu_status_pill_lab, "OFFLINE");
     if (bambu_status_pill) lv_obj_set_style_bg_color(bambu_status_pill, lv_color_hex(0xEF5350), LV_PART_MAIN);
-    if (home_bambu_badge_lab)
-    {
-      lv_label_set_text(home_bambu_badge_lab, "BAMBU ERROR");
-      lv_obj_set_style_text_color(home_bambu_badge_lab, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    }
-    if (home_bambu_badge) lv_obj_set_style_bg_color(home_bambu_badge, lv_color_hex(0xEF5350), LV_PART_MAIN);
-    start_bambu_badge_flash();
+    home_print_apply(); // weather_slot.ino: the error on Home's printing card
     return;
   }
 
-  // Start the 10-min "finished" badge window + a green full-screen flash
+  // Start the 10-min "Print finished" on Home's card + a green full-screen flash
   // only on a genuinely-observed RUNNING/PREPARE/PAUSE -> FINISH transition -
   // not just any message that happens to say FINISH. Bambu's printer keeps
   // reporting its last real state (including a stale FINISH from hours ago)
@@ -363,7 +309,6 @@ void bambu_apply_to_ui()
 
   strncpy(bambu_prev_gcode_state, bambu.gcode_state, sizeof(bambu_prev_gcode_state) - 1);
   bambu_prev_gcode_state[sizeof(bambu_prev_gcode_state) - 1] = '\0';
-  update_home_bambu_badge();
   home_print_apply(); // weather_slot.ino
 
   if (bambu_pname_lab)
@@ -1026,26 +971,3 @@ void bambu_warning_cycle_cb(lv_timer_t *timer)
   lv_label_set_text_fmt(bambu_bottom_lab, LV_SYMBOL_WARNING "  %s", w[0] ? w : "Printer reports an issue");
 }
 
-// 3 blinks of the Home badge to draw attention to a Bambu connection error;
-// ends with the badge left visible in its (red) error state.
-void bambu_badge_flash_cb(lv_timer_t *timer)
-{
-  bambu_badge_flash_count++;
-  if (bambu_badge_flash_count >= 6)
-  {
-    if (home_bambu_badge) lv_obj_clear_flag(home_bambu_badge, LV_OBJ_FLAG_HIDDEN);
-    lv_timer_del(timer);
-    bambu_badge_flash_timer = NULL;
-    return;
-  }
-  if (!home_bambu_badge) return;
-  if (bambu_badge_flash_count % 2 == 1) lv_obj_clear_flag(home_bambu_badge, LV_OBJ_FLAG_HIDDEN);
-  else lv_obj_add_flag(home_bambu_badge, LV_OBJ_FLAG_HIDDEN);
-}
-
-void start_bambu_badge_flash()
-{
-  if (bambu_badge_flash_timer || !home_bambu_badge) return;
-  bambu_badge_flash_count = 0;
-  bambu_badge_flash_timer = lv_timer_create(bambu_badge_flash_cb, 250, NULL);
-}

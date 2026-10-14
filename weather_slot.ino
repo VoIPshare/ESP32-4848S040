@@ -2,8 +2,8 @@
 // The stats row under the weather shares its place with two cards:
 //  - an incoming call (asterisk.ino), ahead of everything: while it rings,
 //    and CALL_SHOW_AFTER_MS after (CALL_SHOW_MAX_MS at most; a tap hides it);
-//  - what's playing on Jellyfin (jellyfin.ino) and the print in progress
-//    (bambu.ino), taking turns with the stats every SLOT_SWAP_MS while
+//  - what's playing on Jellyfin (jellyfin.ino) and the printer (bambu.ino:
+//    printing, finished for 10 min, or can't connect), taking turns with the stats every SLOT_SWAP_MS while
 //    there's something to show.
 // Only one shows at a time; weather_slot_tick() picks it.
 // Voicemail has its own envelope on every screen (top-right), not a card here.
@@ -18,9 +18,9 @@
 static lv_obj_t *home_call_card = NULL, *home_call_name = NULL, *home_call_sub = NULL;
 static lv_obj_t *home_media_card = NULL, *home_media_icon = NULL, *home_media_title = NULL, *home_media_who = NULL,
                 *home_media_pct = NULL, *home_media_bar = NULL, *home_media_btn = NULL, *home_media_btn_lab = NULL;
-static lv_obj_t *home_print_card = NULL, *home_print_name = NULL, *home_print_sub = NULL, *home_print_pct = NULL,
+static lv_obj_t *home_print_card = NULL, *home_print_icon = NULL, *home_print_name = NULL, *home_print_sub = NULL, *home_print_pct = NULL,
                 *home_print_bar = NULL;
-static bool print_running = false;
+static bool print_running = false; // the printing card has something to show (printing, finished, error)
 static lv_obj_t *home_call_big = NULL, *home_call_big_name = NULL, *home_call_big_num = NULL;
 static lv_obj_t *vm_icon = NULL, *vm_icon_lab = NULL; // every screen, next to the Wi-Fi icon
 static uint32_t call_shown_ms = 0, call_ringing_ms = 0; // when it started / was last seen ringing
@@ -117,7 +117,7 @@ void build_home_slot_cards(lv_obj_t *parent)
 
   // Printing: printer icon, printer name, job and time left, percent, progress.
   home_print_card = slot_card(parent, lv_color_hex(0x2E2418));
-  lv_obj_t *pimg = lv_img_create(home_print_card);
+  lv_obj_t *pimg = home_print_icon = lv_img_create(home_print_card);
   lv_img_set_src(pimg, &home_icon_printer);
   lv_obj_set_style_img_recolor(pimg, COLOR_SECONDARY, LV_PART_MAIN);
   lv_obj_set_style_img_recolor_opa(pimg, LV_OPA_COVER, LV_PART_MAIN);
@@ -358,19 +358,47 @@ void home_print_apply()
 {
   if (!home_print_card) return;
   const char *st = bambu.gcode_state;
-  print_running = !strcmp(st, "RUNNING") || !strcmp(st, "PREPARE") || !strcmp(st, "PAUSE");
-  if (print_running)
+  bool printing = !strcmp(st, "RUNNING") || !strcmp(st, "PREPARE") || !strcmp(st, "PAUSE");
+  bool finished = !printing && bambu_finish_badge_until_ms && millis() < bambu_finish_badge_until_ms;
+  // The card takes its turn while printing, for 10 min after a print
+  // finishes, and while the printer can't be reached.
+  print_running = printing || finished || bambu_gave_up;
+  if (!print_running)
   {
-    lv_label_set_text(home_print_name, bambu_live_product_name[0] ? bambu_live_product_name : settings.printer_name);
-    char sub[96];
+    weather_slot_tick(NULL);
+    return;
+  }
+  lv_label_set_text(home_print_name, bambu_live_product_name[0] ? bambu_live_product_name : settings.printer_name);
+  char sub[96];
+  lv_color_t accent = COLOR_SECONDARY;
+  int bar = constrain(bambu.percent, 0, 100);
+  if (bambu_gave_up)
+  {
+    accent = lv_color_hex(0xEF5350);
+    snprintf(sub, sizeof(sub), "Can't connect - check IP, serial and access code");
+    lv_label_set_text(home_print_pct, "!");
+    bar = 0;
+  }
+  else if (finished)
+  {
+    accent = COLOR_SUCCESS;
+    snprintf(sub, sizeof(sub), "%s \xE2\x80\xA2 %s", tr(S_PRINT_FINISHED), bambu.job_name);
+    lv_label_set_text(home_print_pct, "100%");
+    bar = 100;
+  }
+  else
+  {
     if (!strcmp(st, "PREPARE")) snprintf(sub, sizeof(sub), "%s", tr(S_PREPARING));
     else if (!strcmp(st, "PAUSE")) snprintf(sub, sizeof(sub), "Paused \xE2\x80\xA2 %s", bambu.job_name);
     else if (bambu.remain_time_min > 0)
       snprintf(sub, sizeof(sub), "%dh %02dm left \xE2\x80\xA2 %s", bambu.remain_time_min / 60, bambu.remain_time_min % 60, bambu.job_name);
     else snprintf(sub, sizeof(sub), "%s", bambu.job_name);
-    lv_label_set_text(home_print_sub, sub);
     lv_label_set_text_fmt(home_print_pct, "%d%%", bambu.percent);
-    lv_bar_set_value(home_print_bar, constrain(bambu.percent, 0, 100), LV_ANIM_OFF);
   }
+  lv_label_set_text(home_print_sub, sub);
+  lv_obj_set_style_text_color(home_print_pct, accent, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(home_print_bar, accent, LV_PART_INDICATOR);
+  lv_obj_set_style_img_recolor(home_print_icon, accent, LV_PART_MAIN);
+  lv_bar_set_value(home_print_bar, bar, LV_ANIM_OFF);
   weather_slot_tick(NULL);
 }

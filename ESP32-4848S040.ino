@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.31"
+#define FW_VERSION "3.32"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -279,26 +279,20 @@ void wifi_indicator_update_visibility();
 // badge after 10 minutes. All updated only from bambu_apply_to_ui() (an
 // event-driven push, not a poll) and clock_tick_cb()'s existing local 1s
 // tick (for the timeout check only - no network involved).
-static lv_obj_t *home_bambu_badge = NULL;
-static lv_obj_t *home_bambu_badge_lab = NULL;
 static char bambu_prev_gcode_state[16] = "";
-static uint32_t bambu_finish_badge_until_ms = 0; // 0 = finished-badge not active
+static uint32_t bambu_finish_badge_until_ms = 0; // 0 = not showing "Print finished" on Home's printing card
 #define BAMBU_FINISH_BADGE_MS (10UL * 60UL * 1000UL)
 
-// Full-screen green flash on print finish, and a few blinks of the Home
-// badge on connection error - both purely local LVGL-thread visual effects,
+// Full-screen green flash on print finish - a purely local LVGL-thread visual effect,
 // same "toggle HIDDEN, never animate opacity" pattern as blackout_overlay
 // (animated/partial opacity on a full 480x480 object breaks on this board -
 // see switch_screen()/blackout_overlay history).
 static lv_obj_t *finish_flash_overlay = NULL;
 static lv_timer_t *finish_flash_timer = NULL;
 static uint8_t finish_flash_count = 0;
-static lv_timer_t *bambu_badge_flash_timer = NULL;
-static uint8_t bambu_badge_flash_count = 0;
 
-// Home screen "node offline" badge (see create_home_screen()) - same
-// show/hide-a-pill idea as home_bambu_badge above, just anchored top-right
-// instead of top-left so the two can never overlap if both are up at once.
+// Home screen "node offline" badge (see create_home_screen()), anchored
+// top-right of the weather panel.
 // Updated only from proxmox_apply_to_ui() in proxmox.ino, on the same
 // event-driven-push basis as the Bambu badge.
 static lv_obj_t *home_proxmox_badge = NULL;
@@ -488,11 +482,12 @@ void clock_tick_cb(lv_timer_t *timer)
     lv_obj_add_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
   }
 
-  // Notice when the 10-min "finished" badge window has elapsed. Purely a
-  // local countdown check against millis() - no network call here.
+  // The 10-min "Print finished" on Home's printing card has elapsed. Purely
+  // a local countdown check against millis() - no network call here.
   if (bambu_finish_badge_until_ms != 0 && millis() >= bambu_finish_badge_until_ms)
   {
-    update_home_bambu_badge();
+    bambu_finish_badge_until_ms = 0;
+    home_print_apply(); // weather_slot.ino
   }
 
   // Auto-return to Home after settings.idle_return_home_min of no touch -
@@ -915,16 +910,6 @@ void create_nav_menu()
   lv_obj_add_event_cb(nav_menu_hotspot, nav_menu_hotspot_cb, LV_EVENT_ALL, NULL);
 
   nav_shortcuts_apply_mode();
-}
-
-// Tapping the Home screen's print-status badge jumps straight to the Bambu
-// screen (index 1 in screens[]).
-void bambu_badge_clicked_cb(lv_event_t *e)
-{
-  if (screen_pinned) return;
-  bambu_screen_auto_opened = false;
-  bambu_auto_return_home_at_ms = 0;
-  go_to_screen_blackout(1);
 }
 
 // Tapping the Home screen's "node offline" badge jumps straight to the
@@ -3388,17 +3373,6 @@ lv_obj_t *create_home_screen()
   lv_obj_set_style_pad_all(weather_panel, 0, LV_PART_MAIN);
   lv_obj_clear_flag(weather_panel, LV_OBJ_FLAG_SCROLLABLE);
 
-  // Bambu print-status badge - hidden by default, shown/updated by
-  // update_home_bambu_badge() (see bambu_apply_to_ui()). Placed in the empty
-  // strip above the weather icon (which starts at y=30 within this panel),
-  // clear of the clock above and the icon/temperature below.
-  lv_obj_t *bambu_badge_lab = NULL;
-  home_bambu_badge = make_pill(weather_panel, tr(S_PRINTING), COLOR_SECONDARY, lv_color_hex(0x2B1600), &bambu_badge_lab);
-  lv_obj_align(home_bambu_badge, LV_ALIGN_TOP_LEFT, 20, 4);
-  home_bambu_badge_lab = bambu_badge_lab;
-  lv_obj_add_flag(home_bambu_badge, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_event_cb(home_bambu_badge, bambu_badge_clicked_cb, LV_EVENT_CLICKED, NULL);
-
   // Proxmox "node offline" badge - hidden by default, shown/updated by
   // update_home_proxmox_badge() (see proxmox_apply_to_ui() in proxmox.ino).
   // Top-right instead of the Bambu badge's top-left so a print running at
@@ -3505,7 +3479,7 @@ lv_obj_t *create_home_screen()
   for (uint32_t i = 0; i < lv_obj_get_child_cnt(weather_panel); i++)
   {
     lv_obj_t *child = lv_obj_get_child(weather_panel, i);
-    if (child != home_bambu_badge && child != home_proxmox_badge && child != next_card) make_click_through(child);
+    if (child != home_proxmox_badge && child != next_card) make_click_through(child);
   }
   make_click_through(next_accent);
   home_slot_cards_clickable(); // weather_slot.ino: media / voicemail / call cards open their screens
@@ -3857,8 +3831,7 @@ void create_blackout_overlay()
 }
 
 // create_finish_flash_overlay(), finish_flash_timer_cb(),
-// start_finish_screen_flash(), bambu_warning_cycle_cb(),
-// bambu_badge_flash_cb(), and start_bambu_badge_flash() moved to bambu.ino.
+// start_finish_screen_flash() and bambu_warning_cycle_cb() moved to bambu.ino.
 
 // Shows a detail page (not part of the swipe sequence). Its back button -
 // and the top-left corner - call close_subscreen(), which returns to

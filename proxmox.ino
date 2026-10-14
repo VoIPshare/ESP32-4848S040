@@ -209,9 +209,8 @@ int proxmox_offline_count()
 }
 
 // A few blinks of the Home badge to draw the eye whenever a node newly
-// needs attention - same "toggle HIDDEN, never animate opacity" pattern as
-// bambu.ino's bambu_badge_flash_cb() (animated/partial opacity on a
-// full-screen object breaks on this board - see that file's comment).
+// needs attention - "toggle HIDDEN, never animate opacity" (animated or
+// partial opacity on a full-screen object breaks on this board).
 void proxmox_badge_flash_cb(lv_timer_t *timer)
 {
   proxmox_badge_flash_count++;
