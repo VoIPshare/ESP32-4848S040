@@ -2,7 +2,7 @@
 // Split out of ESP32-4848S040.ino. Talks to a real Proxmox VE cluster over
 // its REST API (https://<host>/api2/json/cluster/resources) using an API
 // token from settings.proxmox_host/proxmox_token_id/proxmox_token_secret -
-// see ESP32-4848S040.ino's build_settings_page() for where those are set.
+// see ESP32-4848S040.ino's send_settings_page() for where those are set.
 //
 // cluster/resources is used instead of /nodes (or one call per node) because
 // it returns nodes, VMs (qemu) and containers (lxc) for the whole cluster in

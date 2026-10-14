@@ -37,6 +37,7 @@
 static uint32_t last_stocks_fetch_ms = 0;
 static uint32_t last_calendar_fetch_ms = 0;
 static uint32_t last_makerworld_fetch_ms = 0;
+static bool makerworld_fetch_ok = false; // last fetch worked - for the setup page
 static uint32_t last_tracking_fetch_ms = 0;
 static uint32_t last_tracking_expire_ms = 0;
 static uint32_t last_flight_check_ms = 0;
@@ -135,6 +136,7 @@ void fetch_makerworld()
 
   data_lock();
   makerworld_fetch_attempted = true;
+  makerworld_fetch_ok = ok;
   // A failed fetch keeps the previous totals on screen.
   if (ok)
   {

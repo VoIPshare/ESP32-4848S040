@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.23"
+#define FW_VERSION "3.24"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -1107,6 +1107,7 @@ const char *tz_name_to_posix(const char *name)
 
 // ==================== Weather (Open-Meteo, no API key needed) ====================
 static uint32_t last_weather_fetch_ms = 0;
+static uint32_t weather_ok_ms = 0; // last fetch that worked - for the setup page
 #define WEATHER_FETCH_INTERVAL_MS (10UL * 60UL * 1000UL)
 
 // Weather icon parts (built by build_weather_icon(), all inside one 210x130
@@ -1419,6 +1420,7 @@ void fetch_weather()
   }
   weather_data.daily_count = nd;
   data_unlock();
+  weather_ok_ms = millis();
   weather_needs_ui_refresh = true;
 
   Serial.printf("[Weather] %.1f C, %s\n", weather_data.temp, wmo_weather_desc(weather_data.wcode));
@@ -1566,359 +1568,456 @@ String js_escape(const String &s)
   return out;
 }
 
-String build_settings_page()
+// Service list for the setup page's status chips and section headers -
+// web_service_status() in web_status.ino fills them in.
+enum { WS_OFF, WS_OK, WS_ERR };
+enum { SVC_WEATHER, SVC_CALENDAR, SVC_BAMBU, SVC_PROXMOX, SVC_STOCKS, SVC_MAKERWORLD, SVC_PACKAGES, SVC_HA, SVC_PHONE, SVC_JELLYFIN, SVC_COUNT };
+static const char *const SVC_NAMES[SVC_COUNT] = {"Weather", "Calendar", "Bambu", "Proxmox", "Stocks",
+                                                 "MakerWorld", "Packages", "Home Assistant", "Asterisk", "Jellyfin"};
+
+// The setup page is sent in pieces as it's built (chunked), instead of as
+// one String of 30+ KB: internal RAM is tight on this board.
+static String page_buf;
+static void pg_flush()
 {
-  String page = F(
-      "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-      "<title>Dashboard Setup</title><style>"
-      "body{background:#121212;color:#fff;font-family:sans-serif;margin:0;padding:24px}"
-      "h2{color:#00BCD4;margin-top:0}"
-      "fieldset{border:1px solid #1E1E1E;background:#1E1E1E;border-radius:12px;padding:16px;margin-bottom:16px}"
-      "legend{color:#00BCD4;padding:0 8px}"
-      "label{display:block;font-size:13px;color:#8A97A0;margin-top:10px}"
-      "input,select{width:100%;box-sizing:border-box;padding:8px;margin-top:4px;border-radius:8px;border:1px solid #333;background:#121212;color:#fff}"
-      "button{width:100%;padding:12px;margin-top:16px;border:0;border-radius:8px;background:#00BCD4;color:#0B2E13;font-size:16px}"
-      "</style></head><body>"
-      "<h2>Dashboard Setup</h2>"
-      "<form action='/save' method='POST'>"
-      "<fieldset><legend>Wi-Fi</legend>"
-      "<label>Home network</label>"
-      "<select name='ssid' id='ssid'>");
-  if (settings.sta_ssid[0] != '\0')
+  if (page_buf.length()) config_server.sendContent(page_buf);
+  page_buf = "";
+}
+static void pg(const String &s) { page_buf += s; if (page_buf.length() > 1800) pg_flush(); }
+static void pg(const char *s) { page_buf += s; if (page_buf.length() > 1800) pg_flush(); }
+static void pg(const __FlashStringHelper *s) { page_buf += s; if (page_buf.length() > 1800) pg_flush(); }
+
+static const char SETUP_CSS[] PROGMEM =
+    ":root{--bg:#121212;--card:#1C2228;--line:#2A333C;--muted:#8A97A0;--pri:#00BCD4;--ok:#4CAF50;--err:#EF5350}"
+    "*{box-sizing:border-box}"
+    "body{background:var(--bg);color:#fff;font:15px/1.4 system-ui,sans-serif;margin:0;padding:16px 16px 96px}"
+    "main{max-width:720px;margin:auto}"
+    "h1{font-size:22px;color:var(--pri);margin:4px 0 12px}"
+    "h3{font-size:12px;letter-spacing:1px;color:var(--muted);margin:22px 4px 8px;font-weight:600}"
+    ".card{background:var(--card);border-radius:14px;padding:14px 16px;margin-bottom:10px}"
+    ".status{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:4px 12px;font-size:13px;color:var(--muted)}"
+    ".status b{color:#fff;font-weight:500}"
+    ".chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}"
+    ".chip{font-size:12px;padding:4px 10px;border-radius:99px;background:#232B33;color:#cfd8dc}"
+    ".chip i,summary i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;flex:none}"
+    ".s1{background:var(--ok)}.s2{background:var(--err)}.s0{background:#4a555f}"
+    "details{background:var(--card);border-radius:14px;margin-bottom:8px}"
+    "summary{list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center}"
+    "summary::-webkit-details-marker{display:none}"
+    "summary b{font-weight:500;white-space:nowrap}"
+    "summary span{margin-left:auto;padding-left:10px;font-size:12px;color:var(--muted);min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+    "summary:after{content:'\\203A';margin-left:10px;color:var(--muted);transition:transform .2s}"
+    "details[open] summary:after{transform:rotate(90deg)}"
+    ".body{padding:0 16px 14px}"
+    "label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}"
+    "input[type=text],input[type=password],input[type=number],input[type=file],select{width:100%;padding:9px 10px;border-radius:9px;"
+    "border:1px solid var(--line);background:var(--bg);color:#fff;font-size:15px}"
+    "input:focus,select:focus{outline:none;border-color:var(--pri)}"
+    ".hint{font-size:12px;color:var(--muted);margin:6px 0 0}"
+    ".hint i,.hint code{font-style:normal;background:#232B33;padding:1px 5px;border-radius:5px}"
+    ".row{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}.row>*{min-width:0}"
+    ".sw{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;font-size:14px;color:#fff}"
+    ".sw input{appearance:none;-webkit-appearance:none;width:42px;height:24px;border-radius:12px;background:#3A4652;position:relative;cursor:pointer;flex:none;margin:0}"
+    ".sw input:before{content:'';position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .15s}"
+    ".sw input:checked{background:var(--pri)}.sw input:checked:before{left:21px}"
+    ".secret{display:flex;gap:8px}.secret input{flex:1;min-width:0}"
+    ".secret button{flex:none;width:auto;margin:0;background:#232B33;color:var(--err);border:0;border-radius:9px;padding:0 12px;font-size:13px}"
+    ".btn{display:block;width:100%;padding:11px;border:0;border-radius:10px;background:#232B33;color:#fff;font-size:15px;margin-top:12px;text-align:center;text-decoration:none;cursor:pointer}"
+    ".btn.pri{background:var(--pri);color:#062A30;font-weight:600}"
+    ".bar{position:fixed;left:0;right:0;bottom:0;background:#0D1013ee;border-top:1px solid var(--line);padding:12px 16px;display:flex;justify-content:center;gap:10px;transform:translateY(110%);transition:transform .2s}"
+    ".bar.show{transform:none}.bar .btn{max-width:340px;margin:0}"
+    "a{color:var(--pri)}";
+
+static void page_status_dot(uint8_t st)
+{
+  pg("<i class='s");
+  pg(String(st));
+  pg("'></i>");
+}
+
+// Opens a collapsible section. svc >= 0 adds that service's status dot and
+// summary; otherwise summary (may be NULL) is shown as is. Services with
+// a problem open by themselves.
+static void page_section(const char *title, int svc, const char *summary, bool open = false)
+{
+  char st_txt[64] = "";
+  uint8_t st = WS_OFF;
+  if (svc >= 0) st = web_service_status(svc, st_txt, sizeof(st_txt));
+  pg(open || st == WS_ERR ? "<details open><summary>" : "<details><summary>");
+  if (svc >= 0) page_status_dot(st);
+  pg("<b>");
+  pg(title);
+  pg("</b><span>");
+  pg(html_escape(svc >= 0 ? String(st_txt) : String(summary ? summary : "")));
+  pg("</span></summary><div class='body'>");
+}
+
+static void page_section_end() { pg(F("</div></details>")); }
+
+static void page_text(const char *label, const char *name, const String &value, const char *placeholder = "",
+                      const char *type = "text", const char *extra = "")
+{
+  pg("<label>");
+  pg(label);
+  pg("</label><input type='");
+  pg(type);
+  pg("' name='");
+  pg(name);
+  pg("' placeholder='");
+  pg(placeholder);
+  pg("' value='");
+  pg(html_escape(value));
+  pg("' ");
+  pg(extra);
+  pg(">");
+}
+
+// A key/password field that never shows the saved value: empty keeps it,
+// Remove sends "-" (which handle_save_post() turns into "not set").
+static void page_secret(const char *label, const char *name, bool saved)
+{
+  pg("<label>");
+  pg(label);
+  pg("</label><div class='secret'><input type='password' autocomplete='new-password' name='");
+  pg(name);
+  pg("' placeholder='");
+  pg(saved ? "saved \xE2\x80\x94 leave empty to keep" : "not set");
+  pg("'>");
+  if (saved) pg(F("<button type='button' onclick='rm(this)'>Remove</button>"));
+  pg("</div>");
+}
+
+static void page_switch(const char *label, const char *name, bool on)
+{
+  pg("<label class='sw'>");
+  pg(label);
+  pg("<input type='checkbox' name='");
+  pg(name);
+  pg("' value='1'");
+  if (on) pg(" checked");
+  pg("></label>");
+}
+
+static void page_hint(const __FlashStringHelper *text)
+{
+  pg("<p class='hint'>");
+  pg(text);
+  pg("</p>");
+}
+
+static void page_select(const char *label, const char *name, const char *const *options, uint8_t count, uint8_t selected)
+{
+  pg("<label>");
+  pg(label);
+  pg("</label><select name='");
+  pg(name);
+  pg("'>");
+  for (uint8_t i = 0; i < count; i++)
   {
-    page += "<option value='" + html_escape(settings.sta_ssid) + "' selected>" + html_escape(settings.sta_ssid) + " (saved)</option>";
+    pg("<option value='" + String(i) + "'");
+    if (i == selected) pg(" selected");
+    pg(">");
+    pg(options[i]);
+    pg("</option>");
   }
-  else
+  pg("</select>");
+}
+
+static void page_hour_select(const char *label, const char *name, uint8_t selected)
+{
+  pg("<div><label>");
+  pg(label);
+  pg("</label><select name='");
+  pg(name);
+  pg("'>");
+  for (int h = 0; h < 24; h++)
   {
-    page += F("<option value=''>Scanning...</option>");
+    char o[48];
+    snprintf(o, sizeof(o), "<option value='%d'%s>%02d:00</option>", h, h == selected ? " selected" : "", h);
+    pg(o);
   }
-  page += F(
-      "</select>"
-      "<label>Password</label><input type='password' name='pass' value='");
-  page += html_escape(settings.sta_pass);
-  page += F(
-      "'>"
-      "</fieldset>"
-      "<fieldset><legend>Clock</legend>"
-      "<label>Time zone</label>"
-      "<select name='tz'>");
-  for (size_t i = 0; i < TZ_TABLE_COUNT; i++)
+  pg("</select></div>");
+}
+
+void send_settings_page()
+{
+  config_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  config_server.send(200, "text/html", "");
+  page_buf = "";
+  page_buf.reserve(2200);
+  pg(F("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+         "<title>Dashboard Setup</title><style>"));
+  pg(FPSTR(SETUP_CSS));
+  pg(F("</style></head><body><main><h1>Dashboard Setup</h1>"));
+
+  // ---- Status ----
   {
-    page += "<option value='";
-    page += TZ_TABLE[i].name;
-    page += "'";
-    if (strcmp(TZ_TABLE[i].name, settings.tz_name) == 0) page += " selected";
-    page += ">";
-    page += TZ_TABLE[i].name;
-    page += "</option>";
+    char line[160];
+    uint32_t up = millis() / 1000;
+    pg(F("<div class='card'><div class='status'>"));
+    snprintf(line, sizeof(line), "<div>Firmware <b>v%s</b></div><div>Up <b>%lu d %lu h %lu min</b></div>", FW_VERSION,
+             (unsigned long)(up / 86400), (unsigned long)(up / 3600 % 24), (unsigned long)(up / 60 % 60));
+    pg(line);
+    if (wifi_connected)
+    {
+      pg("<div>IP <b>" + WiFi.localIP().toString() + "</b></div><div>Wi-Fi <b>" + html_escape(WiFi.SSID()) + " \xC2\xB7 " +
+           String(WiFi.RSSI()) + " dBm</b></div>");
+    }
+    else pg(F("<div>Wi-Fi <b>not connected</b></div>"));
+    pg(F("</div><div class='chips'>"));
+    for (int i = 0; i < SVC_COUNT; i++)
+    {
+      char txt[64];
+      uint8_t st = web_service_status(i, txt, sizeof(txt));
+      pg("<span class='chip' title='");
+      pg(html_escape(txt));
+      pg("'>");
+      page_status_dot(st);
+      pg(SVC_NAMES[i]);
+      pg("</span>");
+    }
+    pg(F("</div></div>"));
   }
-  page += F(
-      "</select>"
-      "</fieldset>"
-      "<fieldset><legend>Weather location</legend>"
-      "<label>City or coordinates</label><input type='text' name='wloc' placeholder='Empty: the time zone city' value='");
-  page += html_escape(settings.weather_location);
-  page += F(
-      "'>"
-      "<label style='margin-top:2px;font-size:11px'>A city, optionally with a 2-letter country code "
-      "(<i>Montreal, CA</i>), or <i>latitude,longitude</i> (<i>45.50,-73.57</i>). Empty uses the city of the "
-      "time zone above.</label>"
-      "</fieldset>"
-      "<fieldset><legend>Language</legend>"
-      "<select name='lang'>");
+
+  pg(F("<form id='f' action='/save' method='POST'><h3>DEVICE</h3>"));
+
+  // ---- Wi-Fi ----
+  page_section("Wi-Fi", -1, settings.sta_ssid, !settings.sta_ssid[0]);
+  pg(F("<label>Network</label><select name='ssid' id='ssid'>"));
+  if (settings.sta_ssid[0]) pg("<option value='" + html_escape(settings.sta_ssid) + "' selected>" + html_escape(settings.sta_ssid) + " (saved)</option>");
+  else pg(F("<option value=''>Scanning...</option>"));
+  pg(F("</select>"));
+  page_secret("Password", "pass", settings.sta_pass[0]);
+  page_hint(F("Empty keeps the saved password while the network stays the same. Remove: an open network."));
+  page_section_end();
+
+  // ---- Clock, language, weather ----
   {
     static const char *LANG_NAMES[] = {"English", "Italiano", "Fran\xC3\xA7" "ais"};
-    for (uint8_t i = 0; i < LANG_COUNT; i++)
+    char sum[96];
+    snprintf(sum, sizeof(sum), "%s \xC2\xB7 %s", settings.weather_location[0] ? settings.weather_location : settings.tz_name,
+             LANG_NAMES[settings.lang < LANG_COUNT ? settings.lang : 0]);
+    page_section("Clock, language &amp; weather", -1, sum);
+    pg(F("<div class='row'><div><label>Time zone</label><select name='tz'>"));
+    for (size_t i = 0; i < TZ_TABLE_COUNT; i++)
     {
-      page += "<option value='" + String(i) + "'";
-      if (settings.lang == i) page += " selected";
-      page += ">";
-      page += LANG_NAMES[i];
-      page += "</option>";
+      pg("<option value='");
+      pg(TZ_TABLE[i].name);
+      pg("'");
+      if (strcmp(TZ_TABLE[i].name, settings.tz_name) == 0) pg(" selected");
+      pg(">");
+      pg(TZ_TABLE[i].name);
+      pg("</option>");
     }
+    pg(F("</select></div><div>"));
+    page_select("Language", "lang", LANG_NAMES, LANG_COUNT, settings.lang);
+    pg(F("</div></div>"));
+    page_text("Weather location", "wloc", settings.weather_location, "Empty: the time zone city");
+    page_hint(F("A city with an optional country code (<i>Montreal, CA</i>) or <i>45.50,-73.57</i>. The language covers dates, "
+                   "weather, Home, Calendar, Agenda, Forecast, Packages and alerts; the technical screens stay in English."));
+    page_section_end();
   }
-  page += F(
-      "</select>"
-      "<label style='margin-top:2px;font-size:11px'>Dates, weather, Home, Calendar, Agenda, Forecast, Packages and "
-      "alerts. The technical screens stay in English.</label>"
-      "</fieldset>"
-      "<fieldset><legend>Home screen</legend>"
-      "<label>Shortcut icons</label><select name='shortcuts'>");
+
+  // ---- Screen ----
   {
+    char sum[64];
+    if (settings.night_dim) snprintf(sum, sizeof(sum), "%d%% \xC2\xB7 dim %02d:00\xE2\x80\x93%02d:00", settings.day_level, settings.night_start, settings.night_end);
+    else snprintf(sum, sizeof(sum), "%d%%", settings.day_level);
+    page_section("Screen", -1, sum);
     static const char *SHORTCUT_MODES[] = {"Always on Home (top-left menu on the other screens)", "Top-left corner menu", "Off"};
-    for (uint8_t i = 0; i < 3; i++)
-    {
-      page += "<option value='" + String(i) + "'";
-      if (settings.home_shortcuts == i) page += " selected";
-      page += ">";
-      page += SHORTCUT_MODES[i];
-      page += "</option>";
-    }
+    page_select("Shortcut icons", "shortcuts", SHORTCUT_MODES, 3, settings.home_shortcuts);
+    page_hint(F("One icon per screen; a tap on the top-left corner of any screen opens them as a menu."));
+    page_text("Brightness (%)", "dlevel", String(settings.day_level), "", "number", "min='5' max='100'");
+    pg(F("<input type='hidden' name='ndim_form' value='1'>"));
+    page_switch("Dim at night", "ndim", settings.night_dim);
+    pg(F("<div class='row'>"));
+    page_hour_select("From", "nstart", settings.night_start);
+    page_hour_select("Until", "nend", settings.night_end);
+    pg(F("</div>"));
+    page_text("Night brightness (%, 0 = screen off)", "nlevel", String(settings.night_level), "", "number", "min='0' max='100'");
+    page_switch("Big clock instead of the dashboard while dimmed", "nclock", settings.night_clock);
+    page_hint(F("At night the screen dims after 30 s without a touch; a touch brings it back."));
+    page_section_end();
   }
-  page += F(
-      "</select>"
-      "<label style='margin-top:2px;font-size:11px'>One icon per screen; tap one to jump there. A tap on the "
-      "top-left corner of any screen opens them as a menu (closes after 10 seconds).</label>"
-      "</fieldset>"
-      "<fieldset><legend>Display brightness</legend>"
-      "<label>Brightness (%)</label><input type='number' min='5' max='100' name='dlevel' value='");
-  page += String(settings.day_level);
-  page += F("'>"
-            "<label><input type='checkbox' name='ndim' value='1' style='width:auto'");
-  if (settings.night_dim) page += F(" checked");
-  page += F("> Dim at night</label>"
-            "<input type='hidden' name='ndim_form' value='1'>"
-            "<label>Night from (hour, 0-23)</label><input type='number' min='0' max='23' name='nstart' value='");
-  page += String(settings.night_start);
-  page += F("'><label>Night until (hour, 0-23)</label><input type='number' min='0' max='23' name='nend' value='");
-  page += String(settings.night_end);
-  page += F("'><label><input type='checkbox' name='nclock' value='1' style='width:auto'");
-  if (settings.night_clock) page += F(" checked");
-  page += F("> Show a big clock instead of the dashboard while dimmed</label>"
-            "<label>Night brightness (%, 0 = screen off)</label><input type='number' min='0' max='100' name='nlevel' value='");
-  page += String(settings.night_level);
-  page += F(
-      "'>"
-      "<label style='margin-top:2px;font-size:11px'>Between those hours the screen dims after 30 seconds without a "
-      "touch; a touch brings it back (with the screen off, that first touch only wakes it).</label>"
-      "</fieldset>"
-      "<fieldset><legend>Firmware updates from GitHub</legend>"
-      "<label>When a new release is out</label><select name='updmode'>");
-  {
-    static const char *UPDATE_MODES[] = {"Show an icon on Home - I choose to install or skip", "Install automatically", "Don't check (Settings -> Check update only)"};
-    for (uint8_t i = 0; i < 3; i++)
-    {
-      page += "<option value='" + String(i) + "'";
-      if (settings.update_mode == i) page += " selected";
-      page += ">";
-      page += UPDATE_MODES[i];
-      page += "</option>";
-    }
-  }
-  page += F(
-      "</select>"
-      "<label style='margin-top:2px;font-size:11px'>Checked once a day against github.com/" GH_REPO " releases.</label>"
-      "</fieldset>"
-      "<fieldset><legend>Bambu printer</legend>"
-      "<label>Printer name</label><input type='text' name='pname' value='");
-  page += html_escape(settings.printer_name);
-  page += F(
-      "'>"
-      "<label>IP address</label><input type='text' name='pip' value='");
-  page += html_escape(settings.printer_ip);
-  page += F("'>"
-            "<label>Port</label><input type='number' min='1' max='65535' name='pport' value='");
-  page += String(settings.printer_port);
-  page += F(
-      "'>"
-      "<label>Serial number</label><input type='text' name='mqtt_sn' value='");
-  page += html_escape(settings.mqtt_sn);
-  page += F(
-      "'>"
-      "<label>LAN access code</label><input type='text' name='mqtt_pass' value='");
-  page += html_escape(settings.mqtt_pass);
-  page += F(
-      "'>"
-      "</fieldset>"
-      "<fieldset><legend>Stocks</legend>"
-      "<label>Symbols (up to 7, comma separated)</label>"
-      "<input type='text' name='stocks' placeholder='AAPL,NVDA,^IXIC' value='");
-  page += html_escape(settings.stock_symbols);
-  page += F(
-      "'>"
-      "<label style='margin-top:2px;font-size:11px'>Yahoo Finance symbols. Indexes start with ^.</label>"
-      "</fieldset>"
-      "<fieldset><legend>Calendar</legend>");
+
+  pg(F("<h3>SERVICES</h3>"));
+
+  // ---- Bambu ----
+  page_section("Bambu printer", SVC_BAMBU, NULL);
+  page_text("Printer name", "pname", settings.printer_name);
+  pg(F("<div class='row'><div>"));
+  page_text("IP address", "pip", settings.printer_ip, "192.168.1.60");
+  pg(F("</div><div>"));
+  page_text("Port", "pport", String(settings.printer_port), "", "number", "min='1' max='65535'");
+  pg(F("</div></div>"));
+  page_text("Serial number", "mqtt_sn", settings.mqtt_sn);
+  page_secret("LAN access code", "mqtt_pass", settings.mqtt_pass[0]);
+  page_section_end();
+
+  // ---- Calendar & flights ----
+  page_section("Calendar &amp; flights", SVC_CALENDAR, NULL);
   for (int i = 0; i < ICS_MAX_FEEDS; i++)
   {
-    page += "<label>iCal URL " + String(i + 1) + "</label><input type='text' name='";
-    page += ICS_PREF_KEYS[i];
-    page += "' placeholder='https://calendar.google.com/calendar/ical/.../basic.ics' value='";
-    page += html_escape(settings.ics_urls[i]);
-    page += "'>";
+    char lab[16];
+    snprintf(lab, sizeof(lab), "iCal URL %d", i + 1);
+    page_text(lab, ICS_PREF_KEYS[i], settings.ics_urls[i], "https://calendar.google.com/calendar/ical/.../basic.ics");
   }
-  page += F(
-      "<label style='margin-top:2px;font-size:11px'>Up to 3 .ics links, merged. Google Calendar: Settings -&gt; "
-      "your calendar -&gt; Integrate calendar -&gt; Secret address in iCal format (treat it like a password). "
-      "Flights in a title like <i>AC871 YUL-&gt;YYZ</i> are pinned on the Home screen with a countdown.</label>"
-      "</fieldset>"
-      "<fieldset><legend>MakerWorld</legend>"
-      "<label>User ID</label><input type='text' name='mwuid' inputmode='numeric' value='");
-  page += html_escape(settings.makerworld_uid);
-  page += F(
-      "'>"
-      "<label style='margin-top:2px;font-size:11px'>The number in your profile's published-models address "
-      "(/design-service/published/&lt;number&gt;/design).</label>"
-      "</fieldset>"
-      "<fieldset><legend>Package tracking</legend>"
-      "<label>PKGE API key</label><input type='password' name='pkge' autocomplete='off' placeholder='");
-  page += settings.pkge_api_key[0] ? F("saved - leave empty to keep") : F("not set");
-  page += F(
-      "'>"
-      "<label style='margin-top:2px;font-size:11px'>From business.pkge.net -&gt; Company profile -&gt; API key. "
-      "Add tracking numbers in the PKGE dashboard. Enter - to remove the key.</label>"
-      "</fieldset>"
-      "<fieldset><legend>Live flight status (optional)</legend>"
-      "<label>AeroDataBox API key</label><input type='password' name='adbkey' autocomplete='off' placeholder='");
-  page += settings.aerodatabox_key[0] ? F("saved - leave empty to keep") : F("not set");
-  page += F(
-      "'>"
-      "<label style='margin-top:2px;font-size:11px'>Free key: rapidapi.com -&gt; AeroDataBox -&gt; Basic plan. "
-      "On the day of a flight in your calendar, shows delays, gate and departed/landed. Enter - to remove the key.</label>"
-      "</fieldset>"
-      "<fieldset><legend>Home Assistant (optional)</legend>"
-      "<label>Address</label><input type='text' name='haurl' placeholder='http://homeassistant.local:8123' value='");
-  page += html_escape(settings.ha_url);
-  page += F("'><label>Long-lived access token</label><input type='password' name='hatok' autocomplete='off' placeholder='");
-  page += settings.ha_token[0] ? F("saved - leave empty to keep") : F("not set");
-  page += F("'><label>Entities (up to 8, comma separated)</label><input type='text' name='haent' "
-            "placeholder='light.desk, switch.fan, sensor.outdoor_temperature' value='");
-  page += html_escape(settings.ha_entities);
-  page += F(
-      "'>"
-      "<label style='margin-top:2px;font-size:11px'>Token: in Home Assistant, your profile -&gt; Security -&gt; "
-      "Long-lived access tokens. Lights, switches, fans, input booleans, automations and scripts toggle with a tap. "
-      "Enter - as token to remove it.</label>"
-      "</fieldset>"
-      "<fieldset><legend>Screenshots</legend>"
-      "<input type='hidden' name='shot_form' value='1'>"
-      "<label><input type='checkbox' name='shotopen' value='1' style='width:auto'");
-  if (settings.shot_open) page += F(" checked");
-  page += F(
-      "> Allow screenshots without login</label>"
-      "<label>Page</label><select id='shotpage'><option value=''>What's on screen now</option>");
+  page_hint(F("Up to 3 .ics links, merged. Google Calendar: Settings -&gt; your calendar -&gt; Integrate calendar -&gt; "
+                 "Secret address in iCal format (treat it like a password). Flights in a title like <i>AC871 YUL-&gt;YYZ</i> "
+                 "are pinned on Home with a countdown."));
+  page_secret("AeroDataBox API key (live flight status, optional)", "adbkey", settings.aerodatabox_key[0]);
+  page_hint(F("Free key: rapidapi.com -&gt; AeroDataBox -&gt; Basic plan. Delays, gate and departed/landed on the day."));
+  page_section_end();
+
+  // ---- Stocks ----
+  page_section("Stocks", SVC_STOCKS, NULL);
+  page_text("Symbols (up to 7, comma separated)", "stocks", settings.stock_symbols, "AAPL,NVDA,^IXIC");
+  page_hint(F("Yahoo Finance symbols. Indexes start with ^."));
+  page_section_end();
+
+  // ---- MakerWorld ----
+  page_section("MakerWorld", SVC_MAKERWORLD, NULL);
+  page_text("User ID", "mwuid", settings.makerworld_uid, "", "text", "inputmode='numeric'");
+  page_hint(F("The number in your profile's published-models address (/design-service/published/&lt;number&gt;/design)."));
+  page_section_end();
+
+  // ---- Packages ----
+  page_section("Packages", SVC_PACKAGES, NULL);
+  page_secret("PKGE API key", "pkge", settings.pkge_api_key[0]);
+  page_hint(F("From business.pkge.net -&gt; Company profile -&gt; API key. Add tracking numbers in the PKGE dashboard."));
+  page_section_end();
+
+  // ---- Proxmox ----
+  page_section("Proxmox cluster", SVC_PROXMOX, NULL);
+  page_text("Host (ip:port)", "pxhost", settings.proxmox_host, "192.168.1.50:8006");
+  page_text("API token ID", "pxtok", settings.proxmox_token_id, "root@pam!dashboard");
+  page_secret("API token secret", "pxsec", settings.proxmox_token_secret[0]);
+  page_hint(F("Datacenter -&gt; Permissions -&gt; API Tokens. A read-only PVEAuditor token is enough."));
+  page_section_end();
+
+  // ---- Home Assistant ----
+  page_section("Home Assistant", SVC_HA, NULL);
+  page_text("Address", "haurl", settings.ha_url, "http://homeassistant.local:8123");
+  page_secret("Long-lived access token", "hatok", settings.ha_token[0]);
+  page_text("Entities (up to 8, comma separated)", "haent", settings.ha_entities, "light.desk, switch.fan, sensor.outdoor_temperature");
+  page_hint(F("Token: your HA profile -&gt; Security -&gt; Long-lived access tokens. Lights, switches, fans, input "
+                 "booleans, automations and scripts toggle with a tap."));
+  page_section_end();
+
+  // ---- Asterisk ----
+  page_section("Asterisk", SVC_PHONE, NULL);
+  pg(F("<div class='row'><div>"));
+  page_text("Manager host", "amihost", settings.ami_host, "192.168.1.10:5038");
+  pg(F("</div><div>"));
+  page_text("AMI user", "amiuser", settings.ami_user, "dashboard");
+  pg(F("</div></div>"));
+  page_secret("AMI secret", "amisec", settings.ami_secret[0]);
+  pg(F("<div class='row'><div>"));
+  page_text("Extensions to watch", "amiext", settings.ami_ext, "101, 102 - empty: all");
+  pg(F("</div><div>"));
+  page_text("Dial context (call back)", "amictx", settings.ami_context, "from-internal");
+  pg(F("</div></div><input type='hidden' name='ami_form' value='1'>"));
+  page_switch("Big caller ID (the number as big as the clock)", "callbig", settings.call_big);
+  page_hint(F("<code>manager.conf</code>: <code>read = call</code>, <code>write = reporting,originate</code> (voicemail "
+                 "counts; call back rings the first extension, then dials the number)."));
+  page_section_end();
+
+  // ---- Jellyfin ----
+  page_section("Jellyfin", SVC_JELLYFIN, NULL);
+  page_text("Address", "jfurl", settings.jf_url, "http://192.168.1.20:8096");
+  page_secret("API key", "jfkey", settings.jf_key[0]);
+  page_hint(F("Jellyfin Dashboard -&gt; API Keys."));
+  page_section_end();
+
+  // ---- Settings that are maintenance, but saved with the rest ----
+  pg(F("<h3>MAINTENANCE</h3>"));
+  {
+    static const char *UPDATE_MODES[] = {"Show an icon on Home - I choose", "Install automatically", "Don't check (Settings -> Check update only)"};
+    static const char *UPDATE_SHORT[] = {"ask", "automatic", "off"};
+    char sum[48];
+    snprintf(sum, sizeof(sum), "v%s \xC2\xB7 updates: %s", FW_VERSION, UPDATE_SHORT[settings.update_mode < 3 ? settings.update_mode : 0]);
+    page_section("Firmware", -1, sum);
+    page_select("When a new release is out", "updmode", UPDATE_MODES, 3, settings.update_mode);
+    page_hint(F("Checked once a day against github.com/" GH_REPO " releases."));
+    pg(F("<div class='row'><a class='btn' href='/firmware.bin'>Download running (.bin)</a>"
+           "<a class='btn' href='https://github.com/" GH_REPO "/releases/latest/download/" GH_ASSET "'>Download latest</a></div>"
+           "<button class='btn' type='button' onclick='ghi()'>Install from GitHub\xE2\x80\xA6</button>"
+           "<label>Upload a .bin</label><input type='file' id='fwfile' accept='.bin'>"
+           "<button class='btn' type='button' onclick='upl()'>Upload firmware</button>"));
+    page_hint(F("Upload the <i>.ino.bin</i> from a release (not the merged one). Install from GitHub also reinstalls the "
+                   "running version or goes back to an older one. The screen goes black for about 90 s, then the device restarts."));
+    page_section_end();
+  }
+
+  page_section("Backup &amp; screenshots", -1, settings.shot_open ? "screenshots open" : NULL);
+  pg(F("<a class='btn' href='/backup'>Download settings</a>"
+         "<label>Restore from a file</label><input type='file' id='bkfile' accept='.json'>"
+         "<button class='btn' type='button' onclick='rst()'>Restore settings</button>"));
+  page_hint(F("The backup includes your passwords and keys - keep it private. Restoring restarts the device."));
+  pg(F("<input type='hidden' name='shot_form' value='1'>"));
+  page_switch("Screenshots without login", "shotopen", settings.shot_open);
+  pg(F("<label>Screenshot of</label><select id='shotpage'><option value=''>What's on screen now</option>"));
   {
     // Same list as SHOT_PAGES (defined further down, with handle_screenshot()).
     static const char *const PAGES[][2] = {
         {"home", "Home"}, {"bambu", "Bambu printer"}, {"calendar", "Calendar"}, {"calday", "Calendar - today"},
         {"agenda", "Agenda"}, {"forecast", "Forecast"}, {"proxmox", "Proxmox"}, {"stocks", "Stocks"},
-        {"makerworld", "MakerWorld"}, {"packages", "Packages"}, {"flight", "Flight"}, {"homeassistant", "Home Assistant"}, {"phone", "Phone (Asterisk)"}, {"jellyfin", "Jellyfin"},
-        {"history", "Print history"}, {"settings", "Settings screen"}, {"quick", "Quick panel"}, {"night", "Night clock"}};
-    for (auto &pg : PAGES)
+        {"makerworld", "MakerWorld"}, {"packages", "Packages"}, {"flight", "Flight"}, {"homeassistant", "Home Assistant"},
+        {"phone", "Phone (Asterisk)"}, {"jellyfin", "Jellyfin"}, {"history", "Print history"}, {"settings", "Settings screen"},
+        {"quick", "Quick panel"}, {"night", "Night clock"}};
+    for (auto &page : PAGES)
     {
-      page += "<option value='";
-      page += pg[0];
-      page += "'>";
-      page += pg[1];
-      page += "</option>";
+      pg("<option value='");
+      pg(page[0]);
+      pg("'>");
+      pg(page[1]);
+      pg("</option>");
     }
   }
-  page += F(
-      "</select>"
-      "<button type='button' style='margin-top:8px' onclick=\"var p=document.getElementById('shotpage').value;"
-      "window.open('/screenshot'+(p?'?page='+p:''),'_blank')\">Take screenshot</button>"
-      "<label style='margin-top:2px;font-size:11px'><i>http://dashboard.local/screenshot</i> returns what the "
-      "screen shows (add <i>?page=forecast</i>, <i>home</i>, <i>bambu</i>, <i>calendar</i>, <i>agenda</i>, "
-      "<i>quick</i>, <i>night</i>, ... to switch first). Off: it needs the setup login. Turn it on only while "
-      "you need it - anyone on your Wi-Fi could then see the screen.</label>"
-      "</fieldset>"
-      "<fieldset><legend>Proxmox cluster</legend>"
-      "<label>Host (ip:port)</label><input type='text' name='pxhost' placeholder='192.168.1.50:8006' value='");
-  page += html_escape(settings.proxmox_host);
-  page += F(
-      "'>"
-      "<label>API token ID</label><input type='text' name='pxtok' placeholder='root@pam!dashboard' value='");
-  page += html_escape(settings.proxmox_token_id);
-  page += F(
-      "'>"
-      "<label>API token secret</label><input type='password' name='pxsec' value='");
-  page += html_escape(settings.proxmox_token_secret);
-  page += F(
-      "'>"
-      "<label style='margin-top:2px;font-size:11px'>Create a token under Datacenter -&gt; Permissions -&gt; API "
-      "Tokens. A PVEAuditor-only token (read-only, \"Privilege Separation\" left on) is enough to show cluster "
-      "status here.</label>"
-      "</fieldset>"
-      "<fieldset><legend>Asterisk caller ID (optional)</legend>"
-      "<label>Manager host (ip or ip:port)</label><input type='text' name='amihost' placeholder='192.168.1.10:5038' value='");
-  page += html_escape(settings.ami_host);
-  page += F("'><label>AMI user</label><input type='text' name='amiuser' placeholder='dashboard' value='");
-  page += html_escape(settings.ami_user);
-  page += F("'><label>AMI secret</label><input type='password' name='amisec' autocomplete='off' placeholder='");
-  page += settings.ami_secret[0] ? F("saved - leave empty to keep") : F("not set");
-  page += F("'><label>Extensions to watch (optional, comma separated)</label><input type='text' name='amiext' "
-            "placeholder='101, 102 - empty: every call' value='");
-  page += html_escape(settings.ami_ext);
-  page += F("'><label>Dial context (call back from the Phone screen)</label><input type='text' name='amictx' "
-            "placeholder='from-internal' value='");
-  page += html_escape(settings.ami_context);
-  page += F("'><input type='hidden' name='ami_form' value='1'>"
-            "<label><input type='checkbox' name='callbig' value='1' style='width:auto'");
-  if (settings.call_big) page += F(" checked");
-  page += F(
-      "> Big caller ID: a ringing call fills the whole weather area, the number as big as the clock</label>"
-      "<label style='margin-top:2px;font-size:11px'>A user in <i>/etc/asterisk/manager.conf</i> with "
-      "<i>read = call</i> and <i>write = reporting,originate</i> is enough (originate: only for call back, which "
-      "rings the first extension above, then dials the number). A ringing call shows the caller on Home while it rings and 30 s after, in place of "
-      "humidity / wind / UV; new voicemails (and who left the last one) take turns there with the weather. "
-      "Mailboxes are the extensions above, in context <i>default</i> (write <i>101@other</i> for another one). "
-      "Enter - as secret to remove it.</label>"
-      "</fieldset>"
-      "<fieldset><legend>Jellyfin (optional)</legend>"
-      "<label>Address</label><input type='text' name='jfurl' placeholder='http://192.168.1.20:8096' value='");
-  page += html_escape(settings.jf_url);
-  page += F("'><label>API key</label><input type='password' name='jfkey' autocomplete='off' placeholder='");
-  page += settings.jf_key[0] ? F("saved - leave empty to keep") : F("not set");
-  page += F(
-      "'>"
-      "<label style='margin-top:2px;font-size:11px'>Dashboard -&gt; API Keys. While something is playing, Home "
-      "alternates humidity / wind / UV with what's playing every 20 s. Enter - as key to remove it.</label>"
-      "</fieldset>"
-      "<button type='submit'>Save</button>"
-      "</form>"
-      "<form method='POST' action='/update' enctype='multipart/form-data' "
-      "onsubmit=\"this.querySelector('button').disabled=true;this.querySelector('button').textContent='Uploading...'\">"
-      "<fieldset><legend>Firmware update</legend>"
-      "<label>Running version " FW_VERSION ". Pick a <i>.ino.bin</i> from the GitHub release "
-      "(not the merged one). The screen goes black for about 90 seconds while it installs, then the "
-      "device restarts.</label>"
-      "<input type='file' name='fw' accept='.bin' required>"
-      "</fieldset>"
-      "<button type='submit'>Upload firmware</button>"
-      "</form>"
-      "<form method='POST' action='/ghinstall' "
-      "onsubmit=\"return confirm('Install this firmware from GitHub now? The device restarts.')\">"
-      "<fieldset><legend>Install from GitHub</legend>"
-      "<label>Installs a release even if it isn't newer: to reinstall, or to go back to an older one. "
-      "Empty = the latest. <a href='https://github.com/" GH_REPO "/releases' target='_blank' style='color:#00BCD4'>"
-      "All releases</a></label>"
-      "<input type='text' name='ver' placeholder='latest, or e.g. 3.19' pattern='[0-9]+(\\.[0-9]+)*'>"
-      "<label><a href='/firmware.bin' style='color:#00BCD4'>Download the running firmware (v" FW_VERSION ")</a> "
-      "or the <a href='https://github.com/" GH_REPO "/releases/latest/download/" GH_ASSET "' style='color:#00BCD4'>"
-      "latest release</a> as a <i>.bin</i> - to keep, or to upload above.</label>"
-      "</fieldset>"
-      "<button type='submit'>Install from GitHub</button>"
-      "</form>"
-      "<form method='POST' action='/restore' enctype='multipart/form-data'>"
-      "<fieldset><legend>Backup</legend>"
-      "<label><a href='/backup' style='color:#00BCD4'>Download all settings</a> as a file (it includes your "
-      "passwords and keys - keep it private). To restore, pick that file and press Restore; the device restarts.</label>"
-      "<input type='file' name='backup' accept='.json' required>"
-      "</fieldset>"
-      "<button type='submit'>Restore settings</button>"
-      "</form>"
-      "<script>"
-      "var saved='");
-  page += js_escape(settings.sta_ssid);
-  page += F(
-      "';"
-      "fetch('/scan').then(r=>r.json()).then(list=>{"
-      "var sel=document.getElementById('ssid');sel.innerHTML='';"
-      "var found=false;"
-      "list.sort((a,b)=>b.rssi-a.rssi);"
-      "list.forEach(n=>{var o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' ('+n.rssi+' dBm)';"
-      "if(n.ssid===saved){o.selected=true;found=true;}sel.appendChild(o);});"
-      "if(saved && !found){var o=document.createElement('option');o.value=saved;o.textContent=saved+' (saved, not in range)';o.selected=true;sel.insertBefore(o,sel.firstChild);}"
-      "});"
-      "</script>"
-      "</body></html>");
-  return page;
+  pg(F("</select><button class='btn' type='button' onclick=\"var v=document.getElementById('shotpage').value;"
+         "window.open('/screenshot'+(v?'?page='+v:''),'_blank')\">Take screenshot</button>"));
+  page_hint(F("<i>/screenshot?page=forecast</i> returns that screen. With screenshots open, anyone on your Wi-Fi can see "
+                 "the screen - turn it on only while you need it."));
+  page_section_end();
+  pg(F("</form></main>"
+         "<div class='bar' id='bar'><button class='btn' type='button' onclick='location.reload()'>Discard</button>"
+         "<button class='btn pri' type='submit' form='f'>Save &amp; restart</button></div>"
+         "<script>"
+         "var f=document.getElementById('f'),bar=document.getElementById('bar');"
+         "function dirty(){bar.classList.add('show')}"
+         "f.addEventListener('input',dirty);f.addEventListener('change',dirty);"
+         "function rm(b){var i=b.previousElementSibling;i.value='-';i.type='text';i.readOnly=true;b.textContent='Removed';b.disabled=true;dirty()}"
+         // Files go as their own POST (not part of the settings form).
+         "function post(url,id,field,msg){var x=document.getElementById(id).files[0];if(!x){alert('Pick a file first');return}"
+         "if(!confirm(msg))return;var d=new FormData();d.append(field,x);document.body.style.opacity=.5;"
+         "fetch(url,{method:'POST',body:d}).then(r=>r.text()).then(t=>{document.open();document.write(t);document.close()})"
+         ".catch(e=>{alert('Failed: '+e);document.body.style.opacity=1})}"
+         "function upl(){post('/update','fwfile','fw','Upload this firmware? The device restarts.')}"
+         "function rst(){post('/restore','bkfile','backup','Restore these settings? The device restarts.')}"
+         "function ghi(){var v=prompt('Install from GitHub: a version (e.g. 3.19), or empty for the latest','');if(v===null)return;"
+         "if(v&&!/^[0-9]+(\\.[0-9]+)*$/.test(v)){alert('Digits and dots only');return}"
+         "var d=new URLSearchParams();d.append('ver',v);fetch('/ghinstall',{method:'POST',body:d}).then(r=>r.text())"
+         ".then(t=>{document.open();document.write(t);document.close()})}"
+         "var saved='"));
+  pg(js_escape(settings.sta_ssid));
+  pg(F("';"
+         "fetch('/scan').then(r=>r.json()).then(list=>{"
+         "var sel=document.getElementById('ssid');sel.innerHTML='';var found=false;"
+         "list.sort((a,b)=>b.rssi-a.rssi);"
+         "list.forEach(n=>{var o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' ('+n.rssi+' dBm)';"
+         "if(n.ssid===saved){o.selected=true;found=true;}sel.appendChild(o);});"
+         "if(saved&&!found){var o=document.createElement('option');o.value=saved;o.textContent=saved+' (saved, not in range)';o.selected=true;sel.insertBefore(o,sel.firstChild);}"
+         "});"
+         "</script></body></html>"));
+  pg_flush();
+  page_buf = String(); // give the memory back
+  config_server.sendContent("");
 }
 
 void handle_root()
 {
   if (!web_auth()) return;
-  config_server.send(200, "text/html", build_settings_page());
+  send_settings_page();
 }
 
 void handle_scan()
@@ -1950,9 +2049,23 @@ void handle_save_post()
   if (config_server.hasArg("pip")) config_server.arg("pip").toCharArray(settings.printer_ip, sizeof(settings.printer_ip));
   if (config_server.hasArg("pport")) settings.printer_port = config_server.arg("pport").toInt();
   if (config_server.hasArg("mqtt_sn")) config_server.arg("mqtt_sn").toCharArray(settings.mqtt_sn, sizeof(settings.mqtt_sn));
-  if (config_server.hasArg("mqtt_pass")) config_server.arg("mqtt_pass").toCharArray(settings.mqtt_pass, sizeof(settings.mqtt_pass));
-  if (config_server.hasArg("ssid")) config_server.arg("ssid").toCharArray(settings.sta_ssid, sizeof(settings.sta_ssid));
-  if (config_server.hasArg("pass")) config_server.arg("pass").toCharArray(settings.sta_pass, sizeof(settings.sta_pass));
+  // The page never sends secrets back: empty keeps the saved one, "-" removes it.
+  if (config_server.hasArg("mqtt_pass"))
+  {
+    String v = config_server.arg("mqtt_pass");
+    if (v == "-") settings.mqtt_pass[0] = '\0';
+    else if (v.length()) v.toCharArray(settings.mqtt_pass, sizeof(settings.mqtt_pass));
+  }
+  if (config_server.hasArg("ssid"))
+  {
+    // Wi-Fi: an empty password keeps the saved one only while the network
+    // stays the same - another network with no password is an open one.
+    String ssid = config_server.arg("ssid"), pass = config_server.arg("pass");
+    bool same = ssid == settings.sta_ssid;
+    ssid.toCharArray(settings.sta_ssid, sizeof(settings.sta_ssid));
+    if (pass == "-" || (pass.length() == 0 && !same)) settings.sta_pass[0] = '\0';
+    else if (pass.length()) pass.toCharArray(settings.sta_pass, sizeof(settings.sta_pass));
+  }
   if (config_server.hasArg("shot_form")) settings.shot_open = config_server.hasArg("shotopen");
   if (config_server.hasArg("ami_form")) settings.call_big = config_server.hasArg("callbig");
   if (config_server.hasArg("lang")) settings.lang = (uint8_t)constrain(config_server.arg("lang").toInt(), 0, LANG_COUNT - 1);
@@ -2017,7 +2130,12 @@ void handle_save_post()
   }
   if (config_server.hasArg("pxhost")) config_server.arg("pxhost").toCharArray(settings.proxmox_host, sizeof(settings.proxmox_host));
   if (config_server.hasArg("pxtok")) config_server.arg("pxtok").toCharArray(settings.proxmox_token_id, sizeof(settings.proxmox_token_id));
-  if (config_server.hasArg("pxsec")) config_server.arg("pxsec").toCharArray(settings.proxmox_token_secret, sizeof(settings.proxmox_token_secret));
+  if (config_server.hasArg("pxsec"))
+  {
+    String v = config_server.arg("pxsec");
+    if (v == "-") settings.proxmox_token_secret[0] = '\0';
+    else if (v.length()) v.toCharArray(settings.proxmox_token_secret, sizeof(settings.proxmox_token_secret));
+  }
   // Asterisk and Jellyfin: plain fields are trimmed and stored as typed,
   // secrets keep the saved value when left empty and are removed with "-".
   struct { const char *arg; char *dst; size_t n; bool secret; } extra[] = {
@@ -2055,7 +2173,7 @@ void handle_save_post()
   ESP.restart();
 }
 
-// Firmware upload from the setup page (see build_settings_page()). Runs on
+// Firmware upload from the setup page (see send_settings_page()). Runs on
 // network_task; the screen shows "Updating firmware" via ota_apply_to_ui().
 static volatile uint8_t ota_percent = 0;
 static volatile bool ota_needs_ui_refresh = false;

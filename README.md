@@ -179,7 +179,9 @@ Two ways in:
 - **On your Wi-Fi** (once the display is connected): open `http://dashboard.local` or the IP shown in Settings, and log in as `admin` with the setup password shown in Settings (random, made once per device).
 - **Setup network** (first setup, or a new Wi-Fi): in Settings turn on **Setup Access Point**, join `ESP32-Dashboard-Setup` with that same password, and browse to `http://192.168.4.1` (no login needed there).
 
-Saving restarts the device.
+At the top, a status card shows the firmware, uptime, IP and Wi-Fi signal, with a dot per service: green working, red failing (hover for why), grey not set up. Below, the settings come in three groups, **Device**, **Services** and **Maintenance**, as sections that fold open; each shows a one-line summary, and a failing service opens by itself. A **Save & restart** bar appears at the bottom once you change something.
+
+Passwords and keys are never sent back to the browser: a saved one shows as *saved — leave empty to keep*, and **Remove** clears it. The Wi-Fi password is kept only while the network stays the same.
 
 | Field | What to enter |
 | --- | --- |
@@ -188,20 +190,20 @@ Saving restarts the device.
 | **Weather location** | A city, optionally with a 2-letter country code (`London, GB`), or `latitude,longitude`. Empty uses the city of the time zone. A city is looked up once with Open-Meteo's geocoding. |
 | **Language** | English, Italiano or Français: dates, weather, Home, Calendar, Agenda, Forecast, Packages, alerts and the quick panel. The technical screens (Bambu, Proxmox, Stocks, MakerWorld, Settings) stay in English. |
 | **Home screen: shortcut icons** | Top-left corner menu (default), always on Home as well, or off. See [Navigation](#navigation). |
-| **Display brightness** | Normal brightness, and night dimming: on/off, from/until hour (it may wrap past midnight, e.g. 23 to 7), the big night clock on/off, and night brightness (0 turns the screen off). At night the screen dims after 30 seconds without a touch; a touch brings it back. |
+| **Screen** | Normal brightness, and night dimming: on/off, from/until hour (it may wrap past midnight, e.g. 23 to 7), the big night clock on/off, and night brightness (0 turns the screen off). At night the screen dims after 30 seconds without a touch; a touch brings it back. |
 | **Firmware updates from GitHub** | Show an icon and let me choose (default), install automatically, or don't check. |
 | **Bambu printer** | Printer name (shown on screen), IP address, port (8883), serial number and LAN access code, from the printer's network settings. |
 | **Stocks** | Up to 7 Yahoo Finance symbols, comma separated: `AAPL,NVDA,^IXIC`. |
-| **Calendar** | Up to 3 `.ics` links. Google Calendar: Settings → your calendar → Integrate calendar → *Secret address in iCal format* (treat it like a password). |
+| **Calendar & flights** | Up to 3 `.ics` links. Google Calendar: Settings → your calendar → Integrate calendar → *Secret address in iCal format* (treat it like a password). |
 | **MakerWorld user ID** | The number in your profile's `/design-service/published/<number>/design` address. |
-| **PKGE API key** | From business.pkge.net → Company profile → API key. Add tracking numbers in the PKGE dashboard. Empty keeps the saved key, `-` removes it. |
-| **AeroDataBox API key** | Optional. Free key: rapidapi.com → AeroDataBox → Basic plan. Empty keeps the saved key, `-` removes it. |
-| **Home Assistant** | Address (`http://homeassistant.local:8123`), a long-lived access token (your HA profile → Security), and up to 8 entity IDs, comma separated: `light.desk, switch.fan, sensor.outdoor_temperature`. Empty token keeps the saved one, `-` removes it. |
+| **PKGE API key** | From business.pkge.net → Company profile → API key. Add tracking numbers in the PKGE dashboard. |
+| **AeroDataBox API key** | Optional. Free key: rapidapi.com → AeroDataBox → Basic plan. |
+| **Home Assistant** | Address (`http://homeassistant.local:8123`), a long-lived access token (your HA profile → Security), and up to 8 entity IDs, comma separated: `light.desk, switch.fan, sensor.outdoor_temperature`. |
 | **Proxmox cluster** | Host as `ip:port` (8006), API token ID (`user@realm!name`) and secret. A read-only PVEAuditor token is enough. |
-| **Asterisk caller ID** | Manager host (`192.168.1.10` or `192.168.1.10:5038`), AMI user and secret, and optionally the extensions to watch (`101, 102` or `PJSIP/101`; empty = every call). Their mailboxes are watched too, in context `default` (write `101@office` for another context). Dial context: where call back dials (`from-internal` on FreePBX). In `/etc/asterisk/manager.conf` the user needs `read = call` and `write = reporting,originate` (voicemail counts via `VoicemailUsersList`, and call back), plus `deny`/`permit` for your LAN. Empty secret keeps the saved one, `-` removes it. |
-| **Jellyfin** | Address (`http://192.168.1.20:8096`) and an API key (Dashboard → API Keys). Empty key keeps the saved one, `-` removes it. |
+| **Asterisk caller ID** | Manager host (`192.168.1.10` or `192.168.1.10:5038`), AMI user and secret, and optionally the extensions to watch (`101, 102` or `PJSIP/101`; empty = every call). Their mailboxes are watched too, in any context (write `101@office` for just that one). Dial context: where call back dials (`from-internal` on FreePBX). In `/etc/asterisk/manager.conf` the user needs `read = call` and `write = reporting,originate` (voicemail counts via `VoicemailUsersList`, and call back), plus `deny`/`permit` for your LAN. |
+| **Jellyfin** | Address (`http://192.168.1.20:8096`) and an API key (Dashboard → API Keys). |
 | **Screenshots** | *Allow screenshots without login* (off by default). See [Screenshots](#screenshots). |
-| **Firmware update** | Upload a `.ino.bin` file to update from the browser. |
+| **Firmware** | Update mode, download the running firmware or the latest release, install from GitHub (also the same or an older version), or upload a `.ino.bin`. |
 | **Backup** | *Download all settings* saves them as a JSON file (with your passwords and keys, so keep it private). Pick that file and press **Restore settings** to load it back, e.g. after a full re-flash or on a second display. |
 
 ## Screenshots
