@@ -534,7 +534,7 @@ static lv_obj_t *phone_status_lab = NULL;
 static lv_obj_t *phone_vm_card = NULL, *phone_vm_count = NULL, *phone_vm_from = NULL;
 static lv_obj_t *phone_empty_lab = NULL;
 static lv_obj_t *phone_row[CALL_LOG_MAX], *phone_row_time[CALL_LOG_MAX], *phone_row_who[CALL_LOG_MAX],
-    *phone_row_status[CALL_LOG_MAX], *phone_row_btn[CALL_LOG_MAX];
+    *phone_row_num[CALL_LOG_MAX], *phone_row_status[CALL_LOG_MAX], *phone_row_btn[CALL_LOG_MAX];
 static bool phone_note_shown = false;
 
 // "14:32" today, "12/10 14:32" (day/month) before.
@@ -602,10 +602,14 @@ void phone_apply_to_ui()
     char when[24];
     phone_format_when(c.when, when, sizeof(when));
     lv_label_set_text(phone_row_time[i], when);
+    // The name on top and the number under it, or just the number, centered.
     char num[40];
     format_phone(c.number, num, sizeof(num));
-    if (c.name[0] && strcmp(c.name, c.number)) lv_label_set_text_fmt(phone_row_who[i], "%s  %s", c.name, num);
-    else lv_label_set_text(phone_row_who[i], c.number[0] ? num : "Unknown");
+    bool named = c.name[0] && strcmp(c.name, c.number);
+    lv_label_set_text(phone_row_who[i], named ? c.name : c.number[0] ? num : "Unknown");
+    lv_label_set_text(phone_row_num[i], named ? num : "");
+    lv_obj_align(phone_row_who[i], LV_ALIGN_LEFT_MID, 100, named ? -8 : 0);
+    (named ? lv_obj_clear_flag : lv_obj_add_flag)(phone_row_num[i], LV_OBJ_FLAG_HIDDEN);
     static const char *const ST[] = {"Ringing", "Answered", "Missed", "Busy"};
     static const uint32_t ST_COLOR[] = {0x00BCD4, 0x4CAF50, 0xEF5350, 0xFF9800};
     lv_label_set_text(phone_row_status[i], ST[c.status & 3]);
@@ -708,9 +712,14 @@ lv_obj_t *create_phone_screen()
     phone_row_who[i] = lv_label_create(row);
     lv_obj_set_style_text_font(phone_row_who[i], &lv_font_ui_16, LV_PART_MAIN);
     lv_obj_set_style_text_color(phone_row_who[i], lv_color_hex(0xFFFFFF), LV_PART_MAIN);
-    lv_obj_set_width(phone_row_who[i], 200);
+    lv_obj_set_width(phone_row_who[i], 212);
     lv_label_set_long_mode(phone_row_who[i], LV_LABEL_LONG_DOT);
-    lv_obj_align(phone_row_who[i], LV_ALIGN_LEFT_MID, 112, 0);
+    lv_obj_align(phone_row_who[i], LV_ALIGN_LEFT_MID, 100, 0);
+
+    phone_row_num[i] = lv_label_create(row);
+    lv_obj_set_style_text_font(phone_row_num[i], &lv_font_ui_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(phone_row_num[i], COLOR_TEXT_MUTED, LV_PART_MAIN);
+    lv_obj_align(phone_row_num[i], LV_ALIGN_LEFT_MID, 100, 10);
 
     phone_row_status[i] = lv_label_create(row);
     lv_obj_set_style_text_font(phone_row_status[i], &lv_font_ui_14, LV_PART_MAIN);

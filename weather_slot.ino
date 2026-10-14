@@ -102,7 +102,7 @@ void build_home_slot_cards(lv_obj_t *parent)
   home_call_big = lv_obj_create(parent);
   lv_obj_set_size(home_call_big, 480, 300);
   lv_obj_set_pos(home_call_big, 0, 0);
-  lv_obj_set_style_bg_color(home_call_big, COLOR_BG, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(home_call_big, lv_color_hex(0x1A222B), LV_PART_MAIN); // Home's background
   lv_obj_set_style_bg_opa(home_call_big, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_border_width(home_call_big, 0, LV_PART_MAIN);
   lv_obj_set_style_radius(home_call_big, 0, LV_PART_MAIN);
