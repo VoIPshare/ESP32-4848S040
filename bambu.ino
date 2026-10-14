@@ -422,7 +422,9 @@ void bambu_apply_to_ui()
       lv_color_t bar_col = has_col ? col : COLOR_TEXT_MUTED;
       if (has_col && lv_color_brightness(col) < 40) bar_col = lv_color_hex(0x9AA4AD);
       lv_obj_set_style_bg_color(bambu_tray_bar[u][i], bar_col, LV_PART_INDICATOR);
-      lv_obj_set_style_border_width(bambu_tray_tile[u][i], in_use ? 2 : 0, LV_PART_MAIN);
+      // Same 2 px border on every tile (tile-coloured unless in use), so the
+      // outline doesn't push that tile's content down.
+      lv_obj_set_style_border_color(bambu_tray_tile[u][i], in_use ? COLOR_SECONDARY : lv_color_hex(0x1E1E1E), LV_PART_MAIN);
     }
   }
 
@@ -887,7 +889,8 @@ lv_obj_t *create_bambu_screen()
     for (int i = 0; i < BAMBU_MAX_TRAYS; i++)
     {
       lv_obj_t *tile = bambu_box(page, i * 111, 20, 103, 86, 0x1E1E1E, 14);
-      lv_obj_set_style_border_color(tile, COLOR_SECONDARY, LV_PART_MAIN);
+      lv_obj_set_style_border_width(tile, 2, LV_PART_MAIN);
+      lv_obj_set_style_border_color(tile, lv_color_hex(0x1E1E1E), LV_PART_MAIN);
       bambu_tray_tile[u][i] = tile;
       lv_obj_t *sw = bambu_box(tile, 10, 8, 22, 22, 0x000000, LV_RADIUS_CIRCLE);
       lv_obj_set_style_border_width(sw, 2, LV_PART_MAIN);
