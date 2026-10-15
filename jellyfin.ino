@@ -12,8 +12,9 @@
 // copied into jf under data_lock() and shown from loop().
 //
 // Pop-ups (jf_notify()): calls (asterisk.ino) and print news (bambu.ino)
-// are shown on every Jellyfin app used in the last 15 minutes, through
-// POST /Sessions/{id}/Message - queued from any task, sent by network_task.
+// are shown on every Jellyfin app used in the last 15 minutes, through the
+// DisplayMessage general command (POST /Sessions/{id}/Command - the Fire TV
+// app shows these) - queued from any task, sent by network_task.
 
 #define JF_FETCH_VISIBLE_MS (5UL * 1000UL)
 #define JF_FETCH_HIDDEN_MS (20UL * 1000UL)
@@ -150,9 +151,11 @@ static void jf_send_messages()
   for (int i = 0; i < n; i++)
   {
     JsonDocument msg;
-    msg["Header"] = q[i].header;
-    msg["Text"] = q[i].text;
-    msg["TimeoutMs"] = JF_MSG_SHOW_MS;
+    msg["Name"] = "DisplayMessage";
+    JsonObject args = msg["Arguments"].to<JsonObject>();
+    args["Header"] = q[i].header;
+    args["Text"] = q[i].text;
+    args["TimeoutMs"] = String(JF_MSG_SHOW_MS); // a string, as the clients expect
     String body;
     serializeJson(msg, body);
     for (JsonObject s : sessions.as<JsonArray>())
@@ -162,7 +165,7 @@ static void jf_send_messages()
       jf_remember_device(dev);
       if (!id[0] || jf_device_muted(dev)) continue;
       char path[96];
-      snprintf(path, sizeof(path), "/Sessions/%s/Message", id);
+      snprintf(path, sizeof(path), "/Sessions/%s/Command", id);
       int code = jf_request(path, true, NULL, NULL, body.c_str());
       Serial.printf("[Jellyfin] pop-up \"%s\" to %s: HTTP %d\n", q[i].header, (const char *)(s["DeviceName"] | "?"), code);
     }
