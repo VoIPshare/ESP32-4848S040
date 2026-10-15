@@ -50,6 +50,7 @@ static const char *volatile jf_cmd = NULL;
 #define JF_CMD_NOTE_MS (10UL * 1000UL)
 static int jf_cmd_code = 0;
 static uint32_t jf_cmd_ms = 0;
+static char jf_cmd_note[112] = ""; // "Sent PlayPause to user - device (204)"
 
 bool jf_configured()
 {
@@ -302,12 +303,16 @@ void jf_maintain()
   if (i >= 0 && cmd)
   {
     jf_cmd_session = -1;
-    char path[96];
+    char path[96], who[64];
     data_lock();
     snprintf(path, sizeof(path), "/Sessions/%s/Playing/%s", i < jf.count ? jf.s[i].id : "-", cmd);
+    strlcpy(who, i < jf.count ? jf.s[i].who : "?", sizeof(who));
     data_unlock();
     int code = jf_request(path, true, NULL, NULL);
-    Serial.printf("[Jellyfin] %s: HTTP %d\n", cmd, code);
+    Serial.printf("[Jellyfin] %s %s: HTTP %d\n", path, who, code);
+    data_lock();
+    snprintf(jf_cmd_note, sizeof(jf_cmd_note), "Sent %s to %s (%d)", cmd, who, code);
+    data_unlock();
     jf_cmd_code = code;
     jf_cmd_ms = millis();
     delay(400); // let the client act before reading it back
@@ -347,8 +352,7 @@ void jf_apply_to_ui()
   else if (jf.http == 0) lv_label_set_text(jf_status_lab, "Connecting...");
   else if (jf.http == 401) lv_label_set_text(jf_status_lab, "API key refused (HTTP 401)");
   else if (jf.http != 200) lv_label_set_text_fmt(jf_status_lab, "Can't reach the server (%d)", jf.http);
-  else if (jf_cmd_ms && millis() - jf_cmd_ms < JF_CMD_NOTE_MS && jf_cmd_code != 200 && jf_cmd_code != 204)
-    lv_label_set_text_fmt(jf_status_lab, "Command refused (%d) - the player may not allow remote control", jf_cmd_code);
+  else if (jf_cmd_ms && millis() - jf_cmd_ms < JF_CMD_NOTE_MS) lv_label_set_text(jf_status_lab, jf_cmd_note); // the last tap's result
   else if (jf.count > JF_SHOWN) lv_label_set_text_fmt(jf_status_lab, "%d streams  \xE2\x80\xA2  %d more not shown", jf.count, jf.count - JF_SHOWN);
   else if (jf.count) lv_label_set_text_fmt(jf_status_lab, "%d stream%s", jf.count, jf.count == 1 ? "" : "s");
   else lv_label_set_text(jf_status_lab, "Connected");
@@ -400,6 +404,11 @@ static void jf_ctrl_cb(lv_event_t *e)
   int v = (int)(intptr_t)lv_event_get_user_data(e);
   jf_cmd = CMD[v % 4];
   jf_cmd_session = v / 4;
+  if (jf_status_lab)
+  {
+    lv_label_set_text_fmt(jf_status_lab, "Sending %s...", CMD[v % 4]); // the tap registered
+    lv_obj_set_style_text_color(jf_status_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
+  }
 }
 
 // A control button; returns its label (the play/pause one changes symbol).
