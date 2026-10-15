@@ -273,10 +273,16 @@ void bambu_apply_to_ui()
     snprintf(msg, sizeof(msg), LV_SYMBOL_WARNING "  %s", tr(S_PRINT_FAILED));
     alert_show(msg, lv_color_hex(0xC62828), 60000UL);
     ph_record(bambu.job_name, false);
+    char text[112];
+    snprintf(text, sizeof(text), "%s: %s", bambu_live_product_name[0] ? bambu_live_product_name : settings.printer_name, bambu.job_name);
+    jf_notify(tr(S_PRINT_FAILED), text); // jellyfin.ino: a pop-up on the TV
   }
   if (strcmp(bambu.gcode_state, "FINISH") == 0 && was_printing_ish)
   {
     ph_record(bambu.job_name, true);
+    char text[112];
+    snprintf(text, sizeof(text), "%s: %s", bambu_live_product_name[0] ? bambu_live_product_name : settings.printer_name, bambu.job_name);
+    jf_notify(tr(S_PRINT_FINISHED), text);
     bambu_finish_badge_until_ms = millis() + BAMBU_FINISH_BADGE_MS;
     start_finish_screen_flash();
     // The Bambu screen for BAMBU_AUTO_SHOW_MS at the end too (setting-gated),
@@ -298,7 +304,13 @@ void bambu_apply_to_ui()
   // after a reboot, since bambu_prev_gcode_state starts empty either way).
   // Suppressed while screen_pinned, same as every other auto-navigate.
   bool now_printing_ish = strcmp(bambu.gcode_state, "RUNNING") == 0 || strcmp(bambu.gcode_state, "PREPARE") == 0;
-  if (!was_printing_ish && now_printing_ish && bambu.percent < 1) bambu_print_started = time(nullptr);
+  if (!was_printing_ish && now_printing_ish && bambu.percent < 1)
+  {
+    bambu_print_started = time(nullptr);
+    char text[112];
+    snprintf(text, sizeof(text), "%s: %s", bambu_live_product_name[0] ? bambu_live_product_name : settings.printer_name, bambu.job_name);
+    jf_notify(tr(S_PRINT_STARTED), text); // jellyfin.ino: a pop-up on the TV
+  }
   if (settings.auto_show_bambu_on_start && !was_printing_ish && now_printing_ish && bambu.percent < 1 &&
       !in_settings && current_screen != 1 && !screen_pinned)
   {
@@ -306,6 +318,17 @@ void bambu_apply_to_ui()
     bambu_screen_auto_opened = true;
     bambu_auto_return_home_at_ms = millis() + BAMBU_AUTO_SHOW_MS;
   }
+
+  // A printer warning (HMS) that wasn't there before: a pop-up on the TV.
+  static char last_warning[64] = "";
+  if (bambu.has_warning && bambu.warning_count > 0 && strcmp(bambu.warning_list[0], last_warning))
+  {
+    strlcpy(last_warning, bambu.warning_list[0], sizeof(last_warning));
+    char text[112];
+    snprintf(text, sizeof(text), "%s: %s", bambu_live_product_name[0] ? bambu_live_product_name : settings.printer_name, last_warning);
+    jf_notify(tr(S_PRINTER_PROBLEM), text);
+  }
+  else if (!bambu.has_warning) last_warning[0] = '\0';
 
   strncpy(bambu_prev_gcode_state, bambu.gcode_state, sizeof(bambu_prev_gcode_state) - 1);
   bambu_prev_gcode_state[sizeof(bambu_prev_gcode_state) - 1] = '\0';

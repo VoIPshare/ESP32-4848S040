@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.34"
+#define FW_VERSION "3.36"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -399,8 +399,8 @@ struct DeviceSettings
   // (local hours, may wrap past midnight) the backlight drops to
   // night_level % after 30 s without a touch; 0 = off. A touch wakes it.
   bool night_dim = false;
-  uint8_t night_start = 23;
-  uint8_t night_end = 7;
+  uint8_t night_start = 23, night_start_min = 0; // hour, minute
+  uint8_t night_end = 7, night_end_min = 0;
   uint8_t night_level = 10;
   uint8_t day_level = 100; // normal brightness, %
   bool night_clock = true;  // dimmed at night: big clock instead of the dashboard (screensaver.ino)
@@ -432,6 +432,8 @@ struct DeviceSettings
   // Jellyfin (jellyfin.ino): server address and an API key (Dashboard -> API Keys).
   char jf_url[96] = "";
   char jf_key[48] = "";
+  bool jf_popups = true; // calls and print news as pop-ups on the Jellyfin clients
+  char jf_mute[200] = "";  // Jellyfin devices that get no pop-ups, "|"-separated
 };
 static DeviceSettings settings;
 
@@ -582,9 +584,11 @@ static uint32_t dim_forced_at = 0;
 bool night_now()
 {
   if (!settings.night_dim || !clock_synced_once) return false;
-  uint8_t s = settings.night_start, e = settings.night_end, h = clock_hour;
+  // Minutes since midnight.
+  int s = settings.night_start * 60 + settings.night_start_min, e = settings.night_end * 60 + settings.night_end_min;
+  int t = clock_hour * 60 + clock_min;
   if (s == e) return false;
-  return s < e ? (h >= s && h < e) : (h >= s || h < e); // e.g. 23 -> 7 wraps past midnight
+  return s < e ? (t >= s && t < e) : (t >= s || t < e); // e.g. 23:30 -> 7:00 wraps past midnight
 }
 
 // Once a second from clock_tick_cb(), and right away on a touch.
@@ -595,8 +599,9 @@ void backlight_update()
   if (dim != was_dim)
   {
     was_dim = dim;
-    Serial.printf("[Night] %s (hour %d, night %d-%d, level %d%%, idle %lu s)\n", dim ? "dimmed" : "awake", clock_hour,
-                  settings.night_start, settings.night_end, dim ? settings.night_level : settings.day_level,
+    Serial.printf("[Night] %s (%02d:%02d, night %02d:%02d-%02d:%02d, level %d%%, idle %lu s)\n", dim ? "dimmed" : "awake", clock_hour,
+                  clock_min, settings.night_start, settings.night_start_min, settings.night_end, settings.night_end_min,
+                  dim ? settings.night_level : settings.day_level,
                   (unsigned long)((millis() - last_activity_ms) / 1000));
   }
   uint8_t want = dim ? settings.night_level : settings.day_level;
@@ -1455,6 +1460,8 @@ void load_settings()
   settings.night_dim = prefs.getBool("ndim", settings.night_dim);
   settings.night_start = prefs.getUChar("nstart", settings.night_start);
   settings.night_end = prefs.getUChar("nend", settings.night_end);
+  settings.night_start_min = prefs.getUChar("nstartm", settings.night_start_min);
+  settings.night_end_min = prefs.getUChar("nendm", settings.night_end_min);
   settings.night_level = prefs.getUChar("nlevel", settings.night_level);
   settings.day_level = prefs.getUChar("dlevel", settings.day_level);
   settings.night_clock = prefs.getBool("nclock", settings.night_clock);
@@ -1475,6 +1482,8 @@ void load_settings()
   settings.call_big = prefs.getBool("callbig", settings.call_big);
   prefs.getString("jfurl", settings.jf_url, sizeof(settings.jf_url));
   prefs.getString("jfkey", settings.jf_key, sizeof(settings.jf_key));
+  settings.jf_popups = prefs.getBool("jfpop", settings.jf_popups);
+  prefs.getString("jfmute", settings.jf_mute, sizeof(settings.jf_mute));
   prefs.end();
 }
 
@@ -1506,6 +1515,8 @@ void save_settings()
   prefs.putBool("ndim", settings.night_dim);
   prefs.putUChar("nstart", settings.night_start);
   prefs.putUChar("nend", settings.night_end);
+  prefs.putUChar("nstartm", settings.night_start_min);
+  prefs.putUChar("nendm", settings.night_end_min);
   prefs.putUChar("nlevel", settings.night_level);
   prefs.putUChar("dlevel", settings.day_level);
   prefs.putBool("nclock", settings.night_clock);
@@ -1525,6 +1536,8 @@ void save_settings()
   prefs.putBool("callbig", settings.call_big);
   prefs.putString("jfurl", settings.jf_url);
   prefs.putString("jfkey", settings.jf_key);
+  prefs.putBool("jfpop", settings.jf_popups);
+  prefs.putString("jfmute", settings.jf_mute);
   prefs.end();
 }
 
@@ -1537,6 +1550,7 @@ String html_escape(const String &s)
   String out = s;
   out.replace("&", "&amp;");
   out.replace("\"", "&quot;");
+  out.replace("'", "&#39;"); // the page quotes attributes with '
   out.replace("<", "&lt;");
   out.replace(">", "&gt;");
   return out;
@@ -1594,7 +1608,7 @@ static const char SETUP_CSS[] PROGMEM =
     "details[open] summary:after{transform:rotate(90deg)}"
     ".body{padding:0 16px 14px}"
     "label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}"
-    "input[type=text],input[type=password],input[type=number],input[type=file],select{width:100%;padding:9px 10px;border-radius:9px;"
+    "input[type=text],input[type=password],input[type=number],input[type=file],input[type=time],select{width:100%;padding:9px 10px;border-radius:9px;"
     "border:1px solid var(--line);background:var(--bg);color:#fff;font-size:15px}"
     "input:focus,select:focus{outline:none;border-color:var(--pri)}"
     ".hint{font-size:12px;color:var(--muted);margin:6px 0 0}"
@@ -1707,21 +1721,14 @@ static void page_select(const char *label, const char *name, const char *const *
   pg("</select>");
 }
 
-static void page_hour_select(const char *label, const char *name, uint8_t selected)
+// "HH:MM" time picker (the browser's own), e.g. the night schedule.
+static void page_time(const char *label, const char *name, uint8_t h, uint8_t m)
 {
-  pg("<div><label>");
-  pg(label);
-  pg("</label><select name='");
-  pg(name);
-  pg("'>");
-  for (int h = 0; h < 24; h++)
-  {
-    char o[48];
-    snprintf(o, sizeof(o), "<option value='%d'%s>%02d:00</option>", h, h == selected ? " selected" : "", h);
-    pg(o);
-  }
-  pg("</select></div>");
+  char o[160];
+  snprintf(o, sizeof(o), "<div><label>%s</label><input type='time' name='%s' value='%02d:%02d' required></div>", label, name, h, m);
+  pg(o);
 }
+
 
 void send_settings_page()
 {
@@ -1805,7 +1812,9 @@ void send_settings_page()
   // ---- Screen ----
   {
     char sum[64];
-    if (settings.night_dim) snprintf(sum, sizeof(sum), "%d%% \xC2\xB7 dim %02d:00\xE2\x80\x93%02d:00", settings.day_level, settings.night_start, settings.night_end);
+    if (settings.night_dim)
+      snprintf(sum, sizeof(sum), "%d%% \xC2\xB7 dim %02d:%02d\xE2\x80\x93%02d:%02d", settings.day_level, settings.night_start,
+               settings.night_start_min, settings.night_end, settings.night_end_min);
     else snprintf(sum, sizeof(sum), "%d%%", settings.day_level);
     page_section("Screen", -1, sum);
     static const char *SHORTCUT_MODES[] = {"Always on Home (top-left menu on the other screens)", "Top-left corner menu", "Off"};
@@ -1815,8 +1824,8 @@ void send_settings_page()
     pg(F("<input type='hidden' name='ndim_form' value='1'>"));
     page_switch("Dim at night", "ndim", settings.night_dim);
     pg(F("<div class='row'>"));
-    page_hour_select("From", "nstart", settings.night_start);
-    page_hour_select("Until", "nend", settings.night_end);
+    page_time("From", "nstart", settings.night_start, settings.night_start_min);
+    page_time("Until", "nend", settings.night_end, settings.night_end_min);
     pg(F("</div>"));
     page_text("Night brightness (%, 0 = screen off)", "nlevel", String(settings.night_level), "", "number", "min='0' max='100'");
     page_switch("Big clock instead of the dashboard while dimmed", "nclock", settings.night_clock);
@@ -1910,7 +1919,25 @@ void send_settings_page()
   page_section("Jellyfin", SVC_JELLYFIN, NULL);
   page_text("Address", "jfurl", settings.jf_url, "http://192.168.1.20:8096");
   page_secret("API key", "jfkey", settings.jf_key[0]);
-  page_hint(F("Jellyfin Dashboard -&gt; API Keys."));
+  pg(F("<input type='hidden' name='jf_form' value='1'>"));
+  page_switch("Pop-ups on the TV: calls (with Asterisk), print started / finished / failed, printer problems", "jfpop",
+              settings.jf_popups);
+  {
+    // One switch per Jellyfin device seen (and every muted one): off = no pop-ups there.
+    char names[16][40]; // up to 8 seen (JF_DEVICE_MAX in jellyfin.ino) + muted ones
+    int n = jf_device_list(names, 16);
+    if (n) pg(F("<label>Pop-ups on</label>"));
+    for (int i = 0; i < n; i++)
+    {
+      String esc = html_escape(names[i]);
+      pg("<input type='hidden' name='jfall' value='" + esc + "'>");
+      pg("<label class='sw'>" + esc + "<input type='checkbox' name='jfdev' value='" + esc + "'");
+      if (!jf_device_muted(names[i])) pg(" checked");
+      pg("></label>");
+    }
+  }
+  page_hint(F("Jellyfin Dashboard -&gt; API Keys. Pop-ups go to the Jellyfin apps used in the last 15 minutes; a device shows "
+              "up here once the dashboard has seen it."));
   page_section_end();
 
   // ---- Settings that are maintenance, but saved with the rest ----
@@ -2052,6 +2079,24 @@ void handle_save_post()
   }
   if (config_server.hasArg("shot_form")) settings.shot_open = config_server.hasArg("shotopen");
   if (config_server.hasArg("ami_form")) settings.call_big = config_server.hasArg("callbig");
+  if (config_server.hasArg("jf_form"))
+  {
+    settings.jf_popups = config_server.hasArg("jfpop");
+    // Muted = devices listed on the page whose switch is off.
+    String mute;
+    for (int i = 0; i < config_server.args(); i++)
+    {
+      if (config_server.argName(i) != "jfall") continue;
+      String dev = config_server.arg(i);
+      bool on = false;
+      for (int k = 0; k < config_server.args() && !on; k++)
+        on = config_server.argName(k) == "jfdev" && config_server.arg(k) == dev;
+      if (on || dev.length() == 0 || mute.length() + dev.length() + 1 >= sizeof(settings.jf_mute)) continue;
+      if (mute.length()) mute += "|";
+      mute += dev;
+    }
+    mute.toCharArray(settings.jf_mute, sizeof(settings.jf_mute));
+  }
   if (config_server.hasArg("lang")) settings.lang = (uint8_t)constrain(config_server.arg("lang").toInt(), 0, LANG_COUNT - 1);
   if (config_server.hasArg("updmode")) settings.update_mode = (uint8_t)constrain(config_server.arg("updmode").toInt(), 0, 2);
   if (config_server.hasArg("ndim_form")) // unchecked boxes aren't sent
@@ -2059,8 +2104,17 @@ void handle_save_post()
     settings.night_dim = config_server.hasArg("ndim");
     settings.night_clock = config_server.hasArg("nclock");
   }
-  if (config_server.hasArg("nstart")) settings.night_start = (uint8_t)constrain(config_server.arg("nstart").toInt(), 0, 23);
-  if (config_server.hasArg("nend")) settings.night_end = (uint8_t)constrain(config_server.arg("nend").toInt(), 0, 23);
+  // Night schedule: "HH:MM" (a bare hour still works).
+  struct { const char *arg; uint8_t *h, *m; } times[] = {{"nstart", &settings.night_start, &settings.night_start_min},
+                                                         {"nend", &settings.night_end, &settings.night_end_min}};
+  for (auto &t : times)
+  {
+    if (!config_server.hasArg(t.arg)) continue;
+    String v = config_server.arg(t.arg);
+    int colon = v.indexOf(':');
+    *t.h = (uint8_t)constrain(v.toInt(), 0, 23);
+    *t.m = colon > 0 ? (uint8_t)constrain(v.substring(colon + 1).toInt(), 0, 59) : 0;
+  }
   if (config_server.hasArg("nlevel")) settings.night_level = (uint8_t)constrain(config_server.arg("nlevel").toInt(), 0, 100);
   if (config_server.hasArg("dlevel")) settings.day_level = (uint8_t)constrain(config_server.arg("dlevel").toInt(), 5, 100);
   if (config_server.hasArg("shortcuts")) settings.home_shortcuts = (uint8_t)constrain(config_server.arg("shortcuts").toInt(), 0, 2);

@@ -315,6 +315,13 @@ static void ami_dial_begin()
   {
     Serial.printf("[AMI] call for %s from %s\n", ami_ev.dest_chan, ami_ev.cid_num);
     call_ui_refresh = true; // Home shows it
+    // And the TV, when Jellyfin is set up.
+    char num[40], text[112];
+    format_phone(ami_blank(ami_ev.cid_num) ? "" : ami_ev.cid_num, num, sizeof(num));
+    const char *name = ami_blank(ami_ev.cid_name) ? "" : ami_ev.cid_name;
+    if (name[0] && strcmp(name, ami_ev.cid_num)) snprintf(text, sizeof(text), "%s  %s", name, num);
+    else snprintf(text, sizeof(text), "%s", num[0] ? num : tr(S_UNKNOWN));
+    jf_notify(tr(S_INCOMING_CALL), text);
   }
   ami_status_refresh = true;
 }

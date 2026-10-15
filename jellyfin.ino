@@ -10,6 +10,10 @@
 //
 // Fetching and commands run on network_task (jf_maintain()); the result is
 // copied into jf under data_lock() and shown from loop().
+//
+// Pop-ups (jf_notify()): calls (asterisk.ino) and print news (bambu.ino)
+// are shown on every Jellyfin app used in the last 15 minutes, through
+// POST /Sessions/{id}/Message - queued from any task, sent by network_task.
 
 #define JF_FETCH_VISIBLE_MS (5UL * 1000UL)
 #define JF_FETCH_HIDDEN_MS (20UL * 1000UL)
@@ -51,10 +55,124 @@ bool jf_configured()
   return settings.jf_url[0] && settings.jf_key[0];
 }
 
+static int jf_request(const char *path, bool post, JsonDocument *doc, JsonDocument *filter, const char *body = NULL); // below
+
+// Device names seen in the session lists (for the setup page's per-device
+// pop-up switches), under data_lock().
+#define JF_DEVICE_MAX 8
+static char jf_devices[JF_DEVICE_MAX][40];
+static int jf_device_count = 0;
+
+static void jf_remember_device(const char *name)
+{
+  if (!name || !name[0]) return;
+  data_lock();
+  bool known = false;
+  for (int i = 0; i < jf_device_count && !known; i++) known = !strcmp(jf_devices[i], name);
+  if (!known && jf_device_count < JF_DEVICE_MAX) strlcpy(jf_devices[jf_device_count++], name, sizeof(jf_devices[0]));
+  data_unlock();
+}
+
+// True when settings.jf_mute ("TV|Phone") lists this device.
+bool jf_device_muted(const char *name)
+{
+  const char *p = settings.jf_mute;
+  size_t n = strlen(name);
+  while (*p)
+  {
+    const char *end = strchr(p, '|');
+    size_t len = end ? (size_t)(end - p) : strlen(p);
+    if (len == n && !strncmp(p, name, n)) return true;
+    if (!end) break;
+    p = end + 1;
+  }
+  return false;
+}
+
+// For the setup page: the devices seen plus the muted ones. Returns how many.
+int jf_device_list(char (*out)[40], int max)
+{
+  int n = 0;
+  data_lock();
+  for (int i = 0; i < jf_device_count && n < max; i++) strlcpy(out[n++], jf_devices[i], 40);
+  data_unlock();
+  const char *p = settings.jf_mute;
+  while (*p && n < max)
+  {
+    const char *end = strchr(p, '|');
+    size_t len = end ? (size_t)(end - p) : strlen(p);
+    char name[40];
+    strlcpy(name, p, min(len + 1, sizeof(name)));
+    bool dup = false;
+    for (int i = 0; i < n && !dup; i++) dup = !strcmp(out[i], name);
+    if (!dup && name[0]) strlcpy(out[n++], name, 40);
+    if (!end) break;
+    p = end + 1;
+  }
+  return n;
+}
+
+#define JF_MSG_MAX 4
+#define JF_MSG_SHOW_MS 15000
+static struct { char header[48]; char text[112]; } jf_msg_q[JF_MSG_MAX];
+static volatile int jf_msg_count = 0;
+
+// Queues a pop-up for the Jellyfin apps (any task). Dropped when Jellyfin
+// isn't set up, pop-ups are off, or a few are already waiting.
+void jf_notify(const char *header, const char *text)
+{
+  if (!jf_configured() || !settings.jf_popups) return;
+  data_lock();
+  if (jf_msg_count < JF_MSG_MAX)
+  {
+    strlcpy(jf_msg_q[jf_msg_count].header, header, sizeof(jf_msg_q[0].header));
+    strlcpy(jf_msg_q[jf_msg_count].text, text, sizeof(jf_msg_q[0].text));
+    jf_msg_count++;
+  }
+  data_unlock();
+}
+
+// network_task: sends the queued pop-ups to every recently used session.
+static void jf_send_messages()
+{
+  struct { char header[48]; char text[112]; } q[JF_MSG_MAX];
+  data_lock();
+  int n = jf_msg_count;
+  memcpy(q, jf_msg_q, sizeof(q));
+  jf_msg_count = 0;
+  data_unlock();
+
+  JsonDocument filter;
+  filter[0]["Id"] = true;
+  filter[0]["DeviceName"] = true;
+  JsonDocument sessions;
+  if (jf_request("/Sessions?ActiveWithinSeconds=900", false, &sessions, &filter) != 200) return;
+  for (int i = 0; i < n; i++)
+  {
+    JsonDocument msg;
+    msg["Header"] = q[i].header;
+    msg["Text"] = q[i].text;
+    msg["TimeoutMs"] = JF_MSG_SHOW_MS;
+    String body;
+    serializeJson(msg, body);
+    for (JsonObject s : sessions.as<JsonArray>())
+    {
+      const char *id = s["Id"] | "";
+      const char *dev = s["DeviceName"] | "";
+      jf_remember_device(dev);
+      if (!id[0] || jf_device_muted(dev)) continue;
+      char path[96];
+      snprintf(path, sizeof(path), "/Sessions/%s/Message", id);
+      int code = jf_request(path, true, NULL, NULL, body.c_str());
+      Serial.printf("[Jellyfin] pop-up \"%s\" to %s: HTTP %d\n", q[i].header, (const char *)(s["DeviceName"] | "?"), code);
+    }
+  }
+}
+
 // GET or POST against the Jellyfin API. Plain http:// or https:// (a LAN
 // server with a self-signed certificate is accepted, like Proxmox). On 200,
 // a GET's answer is parsed into doc (through filter, if given).
-static int jf_request(const char *path, bool post, JsonDocument *doc, JsonDocument *filter)
+static int jf_request(const char *path, bool post, JsonDocument *doc, JsonDocument *filter, const char *body)
 {
   String url = String(settings.jf_url);
   while (url.endsWith("/")) url.remove(url.length() - 1);
@@ -68,7 +186,8 @@ static int jf_request(const char *path, bool post, JsonDocument *doc, JsonDocume
   http.useHTTP10(true); // no chunked encoding, so the answer can be parsed as a stream
   if (!http.begin(https ? (WiFiClient &)secure : plain, url)) return -1;
   http.addHeader("Authorization", String("MediaBrowser Token=\"") + settings.jf_key + "\"");
-  int code = post ? http.POST((uint8_t *)"", 0) : http.GET();
+  if (body) http.addHeader("Content-Type", "application/json");
+  int code = post ? http.POST((uint8_t *)(body ? body : ""), body ? strlen(body) : 0) : http.GET();
   if (code == 200 && doc)
   {
     DeserializationError err = filter ? deserializeJson(*doc, http.getStream(), DeserializationOption::Filter(*filter))
@@ -135,9 +254,10 @@ static void jf_fetch()
   f["PlayState"]["PositionTicks"] = true;
   f["PlayState"]["IsPaused"] = true;
   JsonDocument doc;
-  now.http = jf_request("/Sessions?ActiveWithinSeconds=120", false, &doc, &filter);
+  now.http = jf_request("/Sessions?ActiveWithinSeconds=900", false, &doc, &filter);
   if (now.http == 200)
   {
+    for (JsonObject s : doc.as<JsonArray>()) jf_remember_device(s["DeviceName"] | "");
     // Playing ones first, then paused.
     for (int pass = 0; pass < 2; pass++)
       for (JsonObject s : doc.as<JsonArray>())
@@ -169,6 +289,11 @@ static void jf_fetch()
 void jf_maintain()
 {
   if (!jf_configured()) return;
+  if (jf_msg_count)
+  {
+    jf_send_messages();
+    return;
+  }
   int i = jf_cmd_session;
   const char *cmd = jf_cmd;
   if (i >= 0 && cmd)
