@@ -187,10 +187,16 @@ static int jf_request(const char *path, bool post, JsonDocument *doc, JsonDocume
   if (https) secure.setInsecure();
   HTTPClient http;
   http.setTimeout(6000);
-  http.useHTTP10(true); // no chunked encoding, so the answer can be parsed as a stream
+  // GETs as HTTP/1.0: no chunked encoding, so the answer can be parsed as a
+  // stream. Not for POSTs: HTTPClient sends no Content-Length for an empty
+  // body, and an HTTP/1.0 POST without one has a body "until the connection
+  // closes" - Jellyfin waited for it and the command timed out (curl, on
+  // HTTP/1.1, worked).
+  http.useHTTP10(!post);
   if (!http.begin(https ? (WiFiClient &)secure : plain, url)) return -1;
   http.addHeader("Authorization", String("MediaBrowser Token=\"") + settings.jf_key + "\"");
   if (body) http.addHeader("Content-Type", "application/json");
+  else if (post) http.addHeader("Content-Length", "0");
   int code = post ? http.POST((uint8_t *)(body ? body : ""), body ? strlen(body) : 0) : http.GET();
   if (code == 200 && doc)
   {
