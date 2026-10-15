@@ -44,7 +44,7 @@ All taken on the device with the built-in [screenshot](#screenshots) feature.
 | <img src="images/screenshots/proxmox.png" width="220" alt="Proxmox"><br>Proxmox | <img src="images/screenshots/stocks.png" width="220" alt="Stocks"><br>Stocks | <img src="images/screenshots/makerworld.png" width="220" alt="MakerWorld"><br>MakerWorld |
 | <img src="images/screenshots/packages.png" width="220" alt="Packages"><br>Packages | <img src="images/screenshots/flight.png" width="220" alt="Flight"><br>Flight | <img src="images/screenshots/home-assistant.png" width="220" alt="Home Assistant"><br>Home Assistant |
 | <img src="images/screenshots/quick-panel.png" width="220" alt="Quick panel"><br>Quick panel | <img src="images/screenshots/night-clock.png" width="220" alt="Night clock"><br>Night clock | <img src="images/screenshots/settings.png" width="220" alt="Settings"><br>Settings |
-| <img src="images/screenshots/home-printing.png" width="220" alt="Home with a print running"><br>Home, printing | <img src="images/screenshots/phone.png" width="220" alt="Phone (Asterisk)"><br>Phone (Asterisk) | |
+| <img src="images/screenshots/home-printing.png" width="220" alt="Home with a print running"><br>Home, printing | <img src="images/screenshots/phone.png" width="220" alt="Phone (Asterisk)"><br>Phone (Asterisk) | <img src="images/screenshots/calendar-day.png" width="220" alt="Calendar day view"><br>Calendar, day view |
 
 ## Hardware Requirements
 

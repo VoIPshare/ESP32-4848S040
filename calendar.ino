@@ -898,8 +898,15 @@ static bool agenda_add_day(int which, time_t now)
 
   char hdr[64], dm[32];
   format_day_month(dm, sizeof(dm), d.tm_mon, d.tm_mday);
-  if (which < 2) snprintf(hdr, sizeof(hdr), "%s  -  %s", which ? tr(S_TOMORROW_UP) : tr(S_TODAY_UP), dm);
-  else format_long_date(hdr, sizeof(hdr), d.tm_wday, d.tm_mon, d.tm_mday);
+  // "TODAY  -  October 15", "TOMORROW  -  ...", then "SATURDAY  -  October 17".
+  char wd[24];
+  if (which < 2) strlcpy(wd, which ? tr(S_TOMORROW_UP) : tr(S_TODAY_UP), sizeof(wd));
+  else
+  {
+    strlcpy(wd, WEEKDAY_NAMES[d.tm_wday % 7], sizeof(wd));
+    for (char *c = wd; *c; c++) *c = toupper((unsigned char)*c); // ASCII letters; accented ones stay
+  }
+  snprintf(hdr, sizeof(hdr), "%s  -  %s", wd, dm);
   agenda_header(hdr);
 
   if (same_month)
