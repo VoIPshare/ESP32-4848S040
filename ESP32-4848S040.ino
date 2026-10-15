@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.33"
+#define FW_VERSION "3.34"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -513,6 +513,7 @@ void clock_tick_cb(lv_timer_t *timer)
         in_subscreen = false;
         if (page_dots_row) lv_obj_clear_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
       }
+      calendar_view_reset(); // calendar.ino: back to this month
       go_to_screen_blackout(0);
     }
   }

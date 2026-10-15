@@ -467,10 +467,12 @@ struct IcsEvent
 struct IcsWindow
 {
   time_t now;
-  time_t from;        // local midnight on the 1st of this month
+  time_t from;        // where expanding starts: the month's 1st, or now if that's earlier
+  time_t month_start; // local midnight on the 1st of the month the day lists are for
   time_t to;          // max(now + 7 days, first day of next month)
   time_t month_end;
   CalendarData *out;
+  uint8_t feed; // the feed being read - kept on every event it adds
 };
 
 // Parses "20261010", "20261010T140000" (local / TZID) or "20261010T140000Z" (UTC).
@@ -562,7 +564,7 @@ static void unescape_text(char *s)
   *out = '\0';
 }
 
-static void add_upcoming(CalendarData *out, const IcsEvent &ev, time_t s, time_t e)
+static void add_upcoming(CalendarData *out, const IcsEvent &ev, time_t s, time_t e, uint8_t feed)
 {
   const int cap = CALENDAR_UPCOMING_MAX;
   int n = out->upcoming_count;
@@ -578,11 +580,12 @@ static void add_upcoming(CalendarData *out, const IcsEvent &ev, time_t s, time_t
   item.start = s;
   item.end = e;
   item.all_day = ev.all_day;
+  item.feed = feed;
   if (n < cap) out->upcoming_count++;
 }
 
 // Inserts one entry in a day's list, kept sorted by start time.
-static void add_to_day(CalendarData *out, int day, const IcsEvent &ev, time_t sort_key, time_t start, bool all_day)
+static void add_to_day(CalendarData *out, int day, const IcsEvent &ev, time_t sort_key, time_t start, time_t end, bool all_day, uint8_t feed)
 {
   out->has_event[day] = true;
   CalendarEvent *list = out->days[day];
@@ -598,6 +601,8 @@ static void add_to_day(CalendarData *out, int day, const IcsEvent &ev, time_t so
   snprintf(item.title, sizeof(item.title), "%s", ev.summary);
   item.all_day = all_day;
   item.start = sort_key;
+  item.end = end;
+  item.feed = feed;
   item.time[0] = '\0';
   if (!all_day)
   {
@@ -613,7 +618,7 @@ static void add_to_day(CalendarData *out, int day, const IcsEvent &ev, time_t so
 static void add_to_month(IcsWindow &w, const IcsEvent &ev, time_t s, time_t e)
 {
   w.out->month_event_count++;
-  time_t cur = max(s, w.from);
+  time_t cur = max(s, w.month_start);
   for (int guard = 0; guard < 32 && cur < w.month_end && cur < e; guard++)
   {
     struct tm lt;
@@ -621,7 +626,7 @@ static void add_to_month(IcsWindow &w, const IcsEvent &ev, time_t s, time_t e)
     if (lt.tm_mon == w.out->month && lt.tm_mday >= 1 && lt.tm_mday <= CALENDAR_MAX_DAY)
     {
       bool first_day = (cur == s);
-      add_to_day(w.out, lt.tm_mday, ev, cur, s, ev.all_day || !first_day);
+      add_to_day(w.out, lt.tm_mday, ev, cur, s, e, ev.all_day || !first_day, w.feed);
     }
 
     lt.tm_mday += 1;
@@ -642,8 +647,8 @@ static bool emit_occurrence(const IcsEvent &ev, IcsWindow &w, time_t s)
   for (int i = 0; i < ev.exdate_count; i++)
     if (ev.exdates[i] == s) return true;
 
-  if (e > w.now && s < w.now + ICS_LOOKAHEAD_S) add_upcoming(w.out, ev, s, e);
-  if (s < w.month_end) add_to_month(w, ev, s, e > s ? e : s + 1);
+  if (e > w.now && s < w.now + ICS_LOOKAHEAD_S) add_upcoming(w.out, ev, s, e, w.feed);
+  if (s < w.month_end && (e > w.month_start || (dur == 0 && s >= w.month_start))) add_to_month(w, ev, s, e > s ? e : s + 1);
 
   // Remember the earliest flight not yet over within the next week: still to
   // depart (shown with a countdown) or departed but before its calendar end,
@@ -945,7 +950,7 @@ static bool read_ics_feed(const char *url, IcsWindow &w)
   return true;
 }
 
-bool df_fetch_calendar(const char urls[][ICS_URL_MAX], int n, CalendarData *out, int *failed)
+bool df_fetch_calendar(const char urls[][ICS_URL_MAX], int n, CalendarData *out, int *failed, int year, int month)
 {
   if (failed) *failed = 0;
   if (!out) return false;
@@ -958,14 +963,18 @@ bool df_fetch_calendar(const char urls[][ICS_URL_MAX], int n, CalendarData *out,
   }
 
   memset(out, 0, sizeof(*out));
-  out->year = now_tm.tm_year + 1900;
-  out->month = now_tm.tm_mon;
+  out->year = year > 0 ? year : now_tm.tm_year + 1900;
+  out->month = year > 0 ? month : now_tm.tm_mon;
 
   IcsWindow w = {};
   w.now = time(nullptr);
   w.from = make_local(out->year, out->month + 1, 1, 0, 0, 0);
   w.month_end = make_local(out->year, out->month + 2, 1, 0, 0, 0);
+  w.month_start = w.from;
   w.to = max(w.now + (time_t)ICS_LOOKAHEAD_S, w.month_end);
+  // Browsing a later month: expand from now, so the upcoming list (from now
+  // on) is still complete.
+  if (w.now < w.from) w.from = w.now;
   w.out = out;
 
   // All feeds go into the same window, so the lists are merged.
@@ -974,6 +983,7 @@ bool df_fetch_calendar(const char urls[][ICS_URL_MAX], int n, CalendarData *out,
   for (int i = 0; i < n; i++)
   {
     if (urls[i][0] == '\0') continue;
+    w.feed = i;
     if (read_ics_feed(urls[i], w)) any_ok = true;
     else failures++;
   }

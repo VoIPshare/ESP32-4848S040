@@ -120,6 +120,32 @@ void fetch_calendar()
   if (failed) Serial.printf("[ICS] %d feed(s) failed\n", failed);
 }
 
+// The month browsed on the Calendar screen (not this one), when the screen
+// asks for it - see cal_month_arrow_cb() in calendar.ino.
+void fetch_calendar_view()
+{
+  cal_view_fetch_req = false;
+  int y = cal_view_req_year, m = cal_view_req_month;
+  static CalendarData *staging = NULL;
+  if (!staging) staging = (CalendarData *)psram_calloc(sizeof(CalendarData));
+  if (!staging) return;
+  int failed = 0;
+  bool ok = df_fetch_calendar(settings.ics_urls, ICS_MAX_FEEDS, staging, &failed, y, m);
+  data_lock();
+  if (!calendar_view) calendar_view = (CalendarData *)psram_calloc(sizeof(CalendarData));
+  if (y == cal_view_req_year && m == cal_view_req_month)
+  {
+    if (ok && calendar_view)
+    {
+      memcpy(calendar_view, staging, sizeof(CalendarData));
+      cal_view_loaded = true;
+    }
+    cal_view_failed = !ok;
+  }
+  data_unlock();
+  calendar_needs_ui_refresh = true;
+}
+
 void fetch_makerworld()
 {
   last_makerworld_fetch_ms = millis();
@@ -326,6 +352,11 @@ void direct_fetch_maintain()
     data_unlock();
   }
 
+  if (cal_view_fetch_req && clock_is_set())
+  {
+    fetch_calendar_view();
+    return;
+  }
   if (now_ms - last_calendar_fetch_ms > CALENDAR_FETCH_INTERVAL_MS ||
       (month_changed && now_ms - last_calendar_fetch_ms > 60000UL))
   {

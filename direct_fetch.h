@@ -81,7 +81,9 @@ bool df_fetch_makerworld_profile(const char *uid, DfMakerWorldProfile *out);
 // interpreted in the current TZ (set by configTzTime()). `out` is a staging
 // buffer: returns true if at least one feed was read, false if every feed
 // failed or the clock isn't set yet (then `out` holds nothing useful).
-bool df_fetch_calendar(const char urls[][ICS_URL_MAX], int n, CalendarData *out, int *failed);
+// year/month (0-11): the month the per-day lists are for; year 0 = this month.
+// The upcoming events and next flight are always from now on.
+bool df_fetch_calendar(const char urls[][ICS_URL_MAX], int n, CalendarData *out, int *failed, int year = 0, int month = 0);
 
 // Parcels in the PKGE account: active ones and those delivered in the last
 // day, still-moving first, newest update first.

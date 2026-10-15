@@ -15,7 +15,7 @@
 
 #define CALENDAR_MAX_DAY 31
 #define CALENDAR_MAX_EVENTS_PER_DAY 6
-#define CALENDAR_UPCOMING_MAX 8
+#define CALENDAR_UPCOMING_MAX 16 // a week ahead, for the Agenda and Up next
 #define CALENDAR_TITLE_MAX 64
 
 // One entry on the Calendar day-detail screen.
@@ -25,6 +25,8 @@ struct CalendarEvent
   char time[6]; // "14:30", empty for all-day events
   bool all_day;
   time_t start; // keeps each day's list sorted
+  time_t end;   // end of the occurrence
+  uint8_t feed; // which iCal feed (0-2) - its colour on screen
 };
 
 // One occurrence in the next few days, for the Home screen's next-event strip.
@@ -34,6 +36,7 @@ struct UpcomingEvent
   time_t start;
   time_t end;
   bool all_day;
+  uint8_t feed; // which iCal feed (0-2)
 };
 
 // Everything the iCal feeds produce for one month. Built by

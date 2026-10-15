@@ -33,6 +33,8 @@ enum LangKey
   S_TRK_ERROR, S_TRK_PREPARING, S_TRK_ENDED, S_UNKNOWN,
   S_NO_PACKAGES,
   S_INCOMING_CALL,
+  S_UP_NEXT, S_DONE, S_NOW, S_IN_MIN, S_IN_H, S_IN_H_MIN, S_IN_DAYS, S_MIN_LEFT,
+  S_LOADING, S_LOAD_FAILED, S_NO_EVENTS_MONTH, S_NOTHING_WEEK,
   S_COUNT
 };
 
@@ -102,6 +104,18 @@ static const char *const LANG_STR[S_COUNT][LANG_COUNT] = {
     {"Unknown", "Sconosciuto", "Inconnu"},
     {"No packages being tracked", "Nessun pacco in tracciamento", "Aucun colis suivi"},
     {"Incoming call", "Chiamata in arrivo", "Appel entrant"},
+    {"UP NEXT", "PROSSIMI", "\xC3\x80 VENIR"},
+    {"done", "finito", "termin\xC3\xA9"},
+    {"now", "adesso", "maintenant"},
+    {"in %d min", "tra %d min", "dans %d min"},
+    {"in %d h", "tra %d h", "dans %d h"},
+    {"in %d h %d min", "tra %d h %d min", "dans %d h %d min"},
+    {"in %d days", "tra %d giorni", "dans %d jours"},
+    {"%d min left", "ancora %d min", "encore %d min"},
+    {"Loading...", "Caricamento...", "Chargement..."},
+    {"Couldn't load this month", "Mese non caricato", "Mois non charg\xC3\xA9"},
+    {"No events this month", "Nessun evento questo mese", "Aucun \xC3\xA9v\xC3\xA9nement ce mois-ci"},
+    {"Nothing scheduled this week", "Niente in programma questa settimana", "Rien de pr\xC3\xA9vu cette semaine"},
 };
 
 static inline const char *tr(LangKey k) { return LANG_STR[k][ui_lang < LANG_COUNT ? ui_lang : 0]; }

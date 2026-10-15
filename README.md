@@ -12,7 +12,7 @@ More in the [Gallery](#gallery).
 | --- | --- | --- | --- |
 | Home: clock, weather, next event | NTP, [Open-Meteo](https://open-meteo.com/), your iCal feeds | city or coordinates | weather every 10 min |
 | Forecast (tap the weather) | Open-Meteo: next 12 hours and 5 days | - | with the weather |
-| Agenda (tap the "Next" card) | your iCal feeds: today and tomorrow | iCal URL | with the calendar |
+| Agenda (tap the "Next" card) | your iCal feeds: the next 7 days, empty days left out | iCal URL | with the calendar |
 | Bambu Lab printer | the printer, over local MQTT | printer IP, serial, access code | live |
 | Calendar (month + day detail) | up to 3 iCal (`.ics`) feeds, merged, recurrence included | iCal URL | every 30 min |
 | Proxmox cluster | Proxmox VE API | host + API token | every 20 s |
@@ -145,7 +145,7 @@ Use the corners or swipe left/right to move between them (see [Navigation](#navi
 
 1. **Home**: clock, date, current weather (icon, temperature, humidity, wind, UV) and the next calendar event or flight; a print in progress takes turns with humidity / wind / UV as a card. Tap the weather for the Forecast, the "Next" card for the Agenda
 2. **Bambu Lab printer**: status, a progress ring with the layer, job, time left with the clock time it'll be done (and when it started), nozzle / bed / chamber temperatures with their targets, the AMS trays (colour, material, remaining, the one in use outlined; more than one AMS scrolls up and down, with each unit's humidity, orange from 40%, red from 50%), the fans, and HMS warnings in their place. Tap the printer name for the **print history**: the last 6 prints, finished or failed, with date and duration
-3. **Calendar**: the current month with event days marked; tap a day for its events
+3. **Calendar**: the month with today in a filled circle and up to three dots under each day with events, one colour per iCal feed; past days dimmed. The arrows next to the month name browse up to 12 months back or ahead (that month is loaded on demand). **Up next** lists the next three events with how long until they start; tap one, or a day, for the **day view**: all-day events as pills, then each event with its start and end time. Today shows finished events dimmed, a "now" line, the event in progress outlined with the minutes left, and how long until the next ones. "‹ Wed 14" / "Fri 16 ›" step through the days
 4. **Proxmox cluster**: up to 3 nodes with status, CPU, RAM, disk and uptime
 5. **Stocks**: up to 7 quotes with daily change and a sparkline of today's price (15-minute steps, with a faint line at yesterday's close)
 6. **MakerWorld**: likes, downloads, prints, collections and boosts with today's growth, designs/followers/level, and the 3 most downloaded designs
