@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.40"
+#define FW_VERSION "3.41"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -143,7 +143,7 @@ Arduino_RGB_Display *gfx = new Arduino_RGB_Display(
 
 // Re-aligns the panel after a bounce-buffer underrun (see rgb_resync.cpp).
 void rgb_panel_resync(Arduino_ESP32RGBPanel *panel);
-#define RGB_RESYNC_INTERVAL_S 2
+#define RGB_RESYNC_INTERVAL_MS 1000
 
 /* Change to your screen resolution */
 static uint32_t screenWidth;
@@ -437,15 +437,28 @@ struct DeviceSettings
 };
 static DeviceSettings settings;
 
+// A shifted picture (40 lines rolled up) recovers within a second: the
+// resync runs on an esp_timer, not on the LVGL loop, so it still happens
+// while loop() is busy (a long redraw, waiting on data_lock()). The restart
+// only takes effect at the next VSYNC, so this is safe from that task and
+// changes nothing while the picture is aligned.
+static void rgb_resync_timer_cb(void *arg)
+{
+  rgb_panel_resync(rgbpanel);
+}
+
+void rgb_resync_timer_start()
+{
+  static esp_timer_handle_t t = NULL;
+  if (t) return;
+  esp_timer_create_args_t args = {};
+  args.callback = rgb_resync_timer_cb;
+  args.name = "rgb_resync";
+  if (esp_timer_create(&args, &t) == ESP_OK) esp_timer_start_periodic(t, RGB_RESYNC_INTERVAL_MS * 1000ULL);
+}
+
 void clock_tick_cb(lv_timer_t *timer)
 {
-  // A shifted picture (40 lines rolled up) recovers within 2 seconds.
-  static uint8_t resync_countdown = RGB_RESYNC_INTERVAL_S;
-  if (--resync_countdown == 0)
-  {
-    resync_countdown = RGB_RESYNC_INTERVAL_S;
-    rgb_panel_resync(rgbpanel);
-  }
 
   uint8_t prev_min = clock_min, prev_mday = clock_mday;
   if (!clock_read_local())
@@ -4212,6 +4225,7 @@ void setup()
     create_finish_flash_overlay();
     last_activity_ms = millis();
     lv_timer_create(clock_tick_cb, 1000, NULL);
+    rgb_resync_timer_start();
     lv_timer_create(bambu_warning_cycle_cb, 5000, NULL);
 
     switch_screen(0, LV_SCR_LOAD_ANIM_NONE);
