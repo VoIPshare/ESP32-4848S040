@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.41"
+#define FW_VERSION "3.42"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -1973,6 +1973,16 @@ void send_settings_page()
     page_section_end();
   }
 
+  page_section("Display", -1, NULL);
+  pg(F("<div class='row'><button class='btn' type='button' onclick=\"fetch('/panel?do=stream').then(r=>r.text()).then(alert)\">"
+       "Restart picture stream</button>"
+       "<button class='btn' type='button' onclick=\"fetch('/panel?do=init').then(r=>r.text()).then(alert)\">"
+       "Re-initialise panel</button></div>"));
+  page_hint(F("If the picture is shifted (the top shows at the bottom): try the first button, then the second. The "
+              "first restarts the stream the board sends to the panel (it also runs every second by itself); the "
+              "second re-sends the panel's setup, as at power-on - the screen may blink."));
+  page_section_end();
+
   page_section("Backup &amp; screenshots", -1, settings.shot_open ? "screenshots open" : NULL);
   pg(F("<a class='btn' href='/backup'>Download settings</a>"
          "<label>Restore from a file</label><input type='file' id='bkfile' accept='.json'>"
@@ -2525,6 +2535,30 @@ void handle_gh_install()
 
 // Setup page: the firmware this board is running, as a .bin (the app
 // image only, as the GitHub release has it - ready to upload again).
+// Setup page, Maintenance -> Display: fixes for a shifted picture, by hand,
+// to tell which part lost sync. "stream": restart the RGB DMA (the same as
+// rgb_resync_timer_cb()); "init": re-send the ST7701 setup over its SPI pins
+// (separate from the RGB pins, so it can run while the picture streams).
+void handle_panel()
+{
+  if (!web_auth()) return;
+  String what = config_server.arg("do");
+  if (what == "stream")
+  {
+    rgb_panel_resync(rgbpanel);
+    Serial.println("[Panel] stream restart (setup page)");
+    config_server.send(200, "text/plain", "Picture stream restarted. Is the picture back in place?");
+  }
+  else if (what == "init")
+  {
+    bus->batchOperation((uint8_t *)st7701_type9_init_operations, sizeof(st7701_type9_init_operations));
+    rgb_panel_resync(rgbpanel);
+    Serial.println("[Panel] re-initialised (setup page)");
+    config_server.send(200, "text/plain", "Panel re-initialised. Is the picture back in place?");
+  }
+  else config_server.send(400, "text/plain", "do=stream or do=init");
+}
+
 void handle_firmware_download()
 {
   if (!web_auth()) return;
@@ -2574,6 +2608,7 @@ void start_config_server()
   config_server.on("/update", HTTP_POST, handle_update_done, handle_update_upload);
   config_server.on("/ghinstall", HTTP_POST, handle_gh_install);
   config_server.on("/firmware.bin", HTTP_GET, handle_firmware_download);
+  config_server.on("/panel", HTTP_GET, handle_panel);
   config_server.on("/scan", handle_scan);
   config_server.on("/save", HTTP_POST, handle_save_post);
   config_server.on("/notify", HTTP_POST, handle_notify);
