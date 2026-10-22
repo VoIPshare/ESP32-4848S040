@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.42"
+#define FW_VERSION "3.43"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -143,6 +143,9 @@ Arduino_RGB_Display *gfx = new Arduino_RGB_Display(
 
 // Re-aligns the panel after a bounce-buffer underrun (see rgb_resync.cpp).
 void rgb_panel_resync(Arduino_ESP32RGBPanel *panel);
+bool rgb_panel_full_reset(Arduino_ESP32RGBPanel *panel);
+// Set by the setup page, done by loop() (not mid-draw): rgb_panel_full_reset().
+static volatile bool panel_reset_request = false;
 #define RGB_RESYNC_INTERVAL_MS 1000
 
 /* Change to your screen resolution */
@@ -290,15 +293,6 @@ static uint32_t bambu_finish_badge_until_ms = 0; // 0 = not showing "Print finis
 static lv_obj_t *finish_flash_overlay = NULL;
 static lv_timer_t *finish_flash_timer = NULL;
 static uint8_t finish_flash_count = 0;
-
-// Home screen "node offline" badge (see create_home_screen()), anchored
-// top-right of the weather panel.
-// Updated only from proxmox_apply_to_ui() in proxmox.ino, on the same
-// event-driven-push basis as the Bambu badge.
-static lv_obj_t *home_proxmox_badge = NULL;
-static lv_obj_t *home_proxmox_badge_lab = NULL;
-static lv_timer_t *proxmox_badge_flash_timer = NULL;
-static uint8_t proxmox_badge_flash_count = 0;
 
 // Bambu/Stocks state touched directly (read/write, not just a function call)
 // from code below that stays in this file (loop(), network_task(), the
@@ -929,14 +923,6 @@ void create_nav_menu()
   lv_obj_add_event_cb(nav_menu_hotspot, nav_menu_hotspot_cb, LV_EVENT_ALL, NULL);
 
   nav_shortcuts_apply_mode();
-}
-
-// Tapping the Home screen's "node offline" badge jumps straight to the
-// Proxmox screen (index 3 in the screens[] array - see setup()).
-void proxmox_badge_clicked_cb(lv_event_t *e)
-{
-  if (screen_pinned) return;
-  go_to_screen_blackout(3);
 }
 
 // Holding the top-left corner 3 s toggles screen_pinned (called from
@@ -1977,10 +1963,13 @@ void send_settings_page()
   pg(F("<div class='row'><button class='btn' type='button' onclick=\"fetch('/panel?do=stream').then(r=>r.text()).then(alert)\">"
        "Restart picture stream</button>"
        "<button class='btn' type='button' onclick=\"fetch('/panel?do=init').then(r=>r.text()).then(alert)\">"
-       "Re-initialise panel</button></div>"));
+       "Re-initialise panel</button></div>"
+       "<button class='btn' type='button' onclick=\"fetch('/panel?do=reset').then(r=>r.text()).then(alert)\">"
+       "Reset display controller</button>"));
   page_hint(F("If the picture is shifted (the top shows at the bottom): try the first button, then the second. The "
               "first restarts the stream the board sends to the panel (it also runs every second by itself); the "
-              "second re-sends the panel's setup, as at power-on - the screen may blink."));
+              "second re-sends the panel's setup, as at power-on; the third resets the board's display "
+              "controller and sets it up again, as at boot. The screen may blink."));
   page_section_end();
 
   page_section("Backup &amp; screenshots", -1, settings.shot_open ? "screenshots open" : NULL);
@@ -2556,7 +2545,12 @@ void handle_panel()
     Serial.println("[Panel] re-initialised (setup page)");
     config_server.send(200, "text/plain", "Panel re-initialised. Is the picture back in place?");
   }
-  else config_server.send(400, "text/plain", "do=stream or do=init");
+  else if (what == "reset")
+  {
+    panel_reset_request = true; // loop(): between draws
+    config_server.send(200, "text/plain", "Display controller reset. Is the picture back in place?");
+  }
+  else config_server.send(400, "text/plain", "do=stream, do=init or do=reset");
 }
 
 void handle_firmware_download()
@@ -3476,18 +3470,6 @@ lv_obj_t *create_home_screen()
   lv_obj_set_style_pad_all(weather_panel, 0, LV_PART_MAIN);
   lv_obj_clear_flag(weather_panel, LV_OBJ_FLAG_SCROLLABLE);
 
-  // Proxmox "node offline" badge - hidden by default, shown/updated by
-  // update_home_proxmox_badge() (see proxmox_apply_to_ui() in proxmox.ino).
-  // Top-right instead of the Bambu badge's top-left so a print running at
-  // the same time a node drops doesn't stack the two badges on top of
-  // each other.
-  lv_obj_t *proxmox_badge_lab = NULL;
-  home_proxmox_badge = make_pill(weather_panel, tr(S_NODE_OFFLINE), lv_color_hex(0xEF5350), lv_color_hex(0xFFFFFF), &proxmox_badge_lab);
-  lv_obj_align(home_proxmox_badge, LV_ALIGN_TOP_RIGHT, -20, 4);
-  home_proxmox_badge_lab = proxmox_badge_lab;
-  lv_obj_add_flag(home_proxmox_badge, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_event_cb(home_proxmox_badge, proxmox_badge_clicked_cb, LV_EVENT_CLICKED, NULL);
-
   build_weather_icon(weather_panel);
 
   lv_obj_t *temp = lv_label_create(weather_panel);
@@ -3582,7 +3564,7 @@ lv_obj_t *create_home_screen()
   for (uint32_t i = 0; i < lv_obj_get_child_cnt(weather_panel); i++)
   {
     lv_obj_t *child = lv_obj_get_child(weather_panel, i);
-    if (child != home_proxmox_badge && child != next_card) make_click_through(child);
+    if (child != next_card) make_click_through(child);
   }
   make_click_through(next_accent);
   home_slot_cards_clickable(); // weather_slot.ino: media / voicemail / call cards open their screens
@@ -4446,6 +4428,13 @@ void loop()
   if (ami_take_status_refresh()) phone_apply_to_ui();
   if (jf_take_ui_refresh()) { home_media_apply(); jf_apply_to_ui(); }
   if (notify_pending) { notify_pending = false; notify_apply_to_ui(); }
+  if (panel_reset_request)
+  {
+    panel_reset_request = false;
+    bool ok = rgb_panel_full_reset(rgbpanel);
+    Serial.printf("[Panel] display controller reset (setup page): %s\n", ok ? "ok" : "FAILED");
+    lv_obj_invalidate(lv_scr_act()); // redraw everything
+  }
   if (shot_page_req >= 0)
   {
     shot_apply_page(shot_page_req);

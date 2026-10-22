@@ -39,4 +39,15 @@ void rgb_panel_resync(Arduino_ESP32RGBPanel *panel)
   esp_lcd_panel_handle_t handle = panel->*private_member(RgbPanelHandle());
   if (handle) esp_lcd_rgb_panel_restart(handle);
 }
+
+// Stronger: resets the LCD controller and sets it up again - the same two
+// calls Arduino_GFX makes at boot (the frame buffer is kept). For when the
+// restart above doesn't bring the picture back. Returns false on an error.
+bool rgb_panel_full_reset(Arduino_ESP32RGBPanel *panel)
+{
+  if (!panel) return false;
+  esp_lcd_panel_handle_t handle = panel->*private_member(RgbPanelHandle());
+  if (!handle) return false;
+  return esp_lcd_panel_reset(handle) == ESP_OK && esp_lcd_panel_init(handle) == ESP_OK;
+}
 #endif

@@ -2,8 +2,9 @@
 // The stats row under the weather shares its place with two cards:
 //  - an incoming call (asterisk.ino), ahead of everything: while it rings,
 //    and CALL_SHOW_AFTER_MS after (CALL_SHOW_MAX_MS at most; a tap hides it);
-//  - what's playing on Jellyfin (jellyfin.ino) and the printer (bambu.ino:
-//    printing, finished for 10 min, or can't connect), taking turns with the stats every SLOT_SWAP_MS while
+//  - Proxmox nodes offline (proxmox.ino), what's playing on Jellyfin
+//    (jellyfin.ino) and the printer (bambu.ino: printing, finished for 10
+//    min, or can't connect), taking turns with the stats every SLOT_SWAP_MS while
 //    there's something to show.
 // Only one shows at a time; weather_slot_tick() picks it.
 // Voicemail has its own envelope on every screen (top-right), not a card here.
@@ -20,7 +21,9 @@ static lv_obj_t *home_media_card = NULL, *home_media_icon = NULL, *home_media_ti
                 *home_media_pct = NULL, *home_media_bar = NULL, *home_media_btn = NULL, *home_media_btn_lab = NULL;
 static lv_obj_t *home_print_card = NULL, *home_print_icon = NULL, *home_print_name = NULL, *home_print_sub = NULL, *home_print_pct = NULL,
                 *home_print_bar = NULL;
-static bool print_running = false; // the printing card has something to show (printing, finished, error)
+static bool print_running = false;
+static lv_obj_t *home_px_card = NULL, *home_px_sub = NULL, *home_px_count = NULL;
+static bool px_offline = false; // the Proxmox card has something to show // the printing card has something to show (printing, finished, error)
 static lv_obj_t *home_call_big = NULL, *home_call_big_name = NULL, *home_call_big_num = NULL;
 static lv_obj_t *vm_icon = NULL, *vm_icon_lab = NULL; // every screen, next to the Wi-Fi icon
 static uint32_t call_shown_ms = 0, call_ringing_ms = 0; // when it started / was last seen ringing
@@ -138,6 +141,21 @@ void build_home_slot_cards(lv_obj_t *parent)
   lv_obj_set_style_radius(home_print_bar, 2, LV_PART_MAIN);
   lv_obj_set_style_radius(home_print_bar, 2, LV_PART_INDICATOR);
 
+  // Proxmox: nodes offline, named; a tap opens the Proxmox screen.
+  home_px_card = slot_card(parent, lv_color_hex(0x3A1A1A));
+  lv_obj_t *srv = lv_img_create(home_px_card);
+  lv_img_set_src(srv, &home_icon_server);
+  lv_obj_set_style_img_recolor(srv, lv_color_hex(0xEF5350), LV_PART_MAIN);
+  lv_obj_set_style_img_recolor_opa(srv, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_align(srv, LV_ALIGN_LEFT_MID, 12, 0);
+  slot_label(home_px_card, &lv_font_ui_20, lv_color_hex(0xFFFFFF), 52, 7, 290);
+  lv_label_set_text(lv_obj_get_child(home_px_card, -1), "Proxmox");
+  home_px_sub = slot_label(home_px_card, &lv_font_ui_14, lv_color_hex(0xFFAB91), 52, 35, 300);
+  home_px_count = lv_label_create(home_px_card);
+  lv_obj_set_style_text_font(home_px_count, &lv_font_ui_28, LV_PART_MAIN);
+  lv_obj_set_style_text_color(home_px_count, lv_color_hex(0xEF5350), LV_PART_MAIN);
+  lv_obj_align(home_px_count, LV_ALIGN_RIGHT_MID, -18, 0);
+
   // Big caller ID: the whole weather panel, everything centered.
   home_call_big = lv_obj_create(parent);
   lv_obj_set_size(home_call_big, 480, 300);
@@ -208,8 +226,9 @@ static void weather_slot_tick(lv_timer_t *t)
   else
   {
     // The stats, then whichever of print / media has something, in turn.
-    lv_obj_t *turns[3] = {home_weather_stats};
+    lv_obj_t *turns[4] = {home_weather_stats};
     int n = 1;
+    if (px_offline) turns[n++] = home_px_card;
     if (print_running) turns[n++] = home_print_card;
     if (media_playing) turns[n++] = home_media_card;
     want = turns[(millis() / SLOT_SWAP_MS) % n];
@@ -224,7 +243,7 @@ static void weather_slot_tick(lv_timer_t *t)
     want = home_weather_stats; // underneath, for when it goes
   }
   else if (home_call_big && !lv_obj_has_flag(home_call_big, LV_OBJ_FLAG_HIDDEN)) lv_obj_add_flag(home_call_big, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_t *all[] = {home_weather_stats, home_call_card, home_media_card, home_print_card};
+  lv_obj_t *all[] = {home_weather_stats, home_call_card, home_media_card, home_print_card, home_px_card};
   for (lv_obj_t *o : all)
   {
     if (!o) continue;
@@ -339,7 +358,7 @@ static void slot_play_pause_cb(lv_event_t *e)
 void home_slot_cards_clickable()
 {
   struct { lv_obj_t *card; uint8_t screen; } cards[] = {
-      {home_media_card, JF_SCREEN_INDEX}, {home_call_card, PHONE_SCREEN_INDEX}, {home_print_card, 1}};
+      {home_media_card, JF_SCREEN_INDEX}, {home_call_card, PHONE_SCREEN_INDEX}, {home_print_card, 1}, {home_px_card, 3}};
   for (auto &c : cards)
   {
     lv_obj_add_flag(c.card, LV_OBJ_FLAG_CLICKABLE);
@@ -400,5 +419,26 @@ void home_print_apply()
   lv_obj_set_style_bg_color(home_print_bar, accent, LV_PART_INDICATOR);
   lv_obj_set_style_img_recolor(home_print_icon, accent, LV_PART_MAIN);
   lv_bar_set_value(home_print_bar, bar, LV_ANIM_OFF);
+  weather_slot_tick(NULL);
+}
+
+// From update_home_proxmox() (proxmox.ino, loop()): the red Proxmox card
+// takes its turn while nodes are offline - their names, and how many.
+void home_proxmox_apply(int offline)
+{
+  if (!home_px_card) return;
+  px_offline = offline > 0;
+  if (px_offline)
+  {
+    char names[96] = "";
+    for (int i = 0; i < PROXMOX_MAX_NODES; i++)
+    {
+      if (!proxmox.nodes[i].valid || !strcmp(proxmox.nodes[i].status, "online")) continue;
+      if (names[0]) strlcat(names, ", ", sizeof(names));
+      strlcat(names, proxmox.nodes[i].name, sizeof(names));
+    }
+    lv_label_set_text_fmt(home_px_sub, "%s %s", names, tr(S_OFFLINE));
+    lv_label_set_text_fmt(home_px_count, "%d", offline);
+  }
   weather_slot_tick(NULL);
 }

@@ -208,40 +208,12 @@ int proxmox_offline_count()
   return n;
 }
 
-// A few blinks of the Home badge to draw the eye whenever a node newly
-// needs attention - "toggle HIDDEN, never animate opacity" (animated or
-// partial opacity on a full-screen object breaks on this board).
-void proxmox_badge_flash_cb(lv_timer_t *timer)
+// From the most recent fetch: the alert banner when a node goes down, and
+// Home's red Proxmox card (weather_slot.ino) while any is offline. Only on
+// a confirmed offline node, never on a failed fetch - a single dropped LAN
+// request isn't worth alarming over.
+void update_home_proxmox()
 {
-  proxmox_badge_flash_count++;
-  if (proxmox_badge_flash_count >= 6)
-  {
-    if (home_proxmox_badge) lv_obj_clear_flag(home_proxmox_badge, LV_OBJ_FLAG_HIDDEN);
-    lv_timer_del(timer);
-    proxmox_badge_flash_timer = NULL;
-    return;
-  }
-  if (!home_proxmox_badge) return;
-  if (proxmox_badge_flash_count % 2 == 1) lv_obj_clear_flag(home_proxmox_badge, LV_OBJ_FLAG_HIDDEN);
-  else lv_obj_add_flag(home_proxmox_badge, LV_OBJ_FLAG_HIDDEN);
-}
-
-void start_proxmox_badge_flash()
-{
-  if (proxmox_badge_flash_timer || !home_proxmox_badge) return;
-  proxmox_badge_flash_count = 0;
-  proxmox_badge_flash_timer = lv_timer_create(proxmox_badge_flash_cb, 250, NULL);
-}
-
-// Shows/hides/labels the Home screen's "node offline" badge from the most
-// recent fetch. Only fires on a confirmed offline node, never on a failed
-// fetch - a single dropped LAN request isn't worth alarming over, same
-// reasoning as the Bambu badge only appearing after BAMBU_MAX_FAILURES
-// rather than on the first failed connect attempt.
-void update_home_proxmox_badge()
-{
-  if (!home_proxmox_badge) return;
-
   int offline = proxmox.valid ? proxmox_offline_count() : 0;
 
   // Alert when a node goes down (not on the first fetch after boot).
@@ -259,32 +231,7 @@ void update_home_proxmox_badge()
     }
     prev_offline = offline;
   }
-  if (offline == 0)
-  {
-    lv_obj_add_flag(home_proxmox_badge, LV_OBJ_FLAG_HIDDEN);
-    return;
-  }
-
-  if (home_proxmox_badge_lab)
-  {
-    if (offline == 1)
-    {
-      // Name the one offline node when there's just one - more useful than
-      // a bare count on a 1- or 2-node box.
-      const char *name = "";
-      for (int i = 0; i < PROXMOX_MAX_NODES; i++)
-      {
-        if (proxmox.nodes[i].valid && strcmp(proxmox.nodes[i].status, "online") != 0) { name = proxmox.nodes[i].name; break; }
-      }
-      lv_label_set_text_fmt(home_proxmox_badge_lab, "%s OFFLINE", name);
-    }
-    else
-    {
-      lv_label_set_text_fmt(home_proxmox_badge_lab, tr(S_NODES_OFFLINE), offline);
-    }
-  }
-  lv_obj_clear_flag(home_proxmox_badge, LV_OBJ_FLAG_HIDDEN);
-  start_proxmox_badge_flash();
+  home_proxmox_apply(offline); // weather_slot.ino
 }
 
 void proxmox_apply_to_ui()
@@ -337,7 +284,7 @@ void proxmox_apply_to_ui()
     }
   }
 
-  update_home_proxmox_badge();
+  update_home_proxmox();
 }
 
 lv_obj_t *create_proxmox_screen()
