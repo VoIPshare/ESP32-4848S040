@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.44"
+#define FW_VERSION "3.45"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -1969,7 +1969,9 @@ void send_settings_page()
        "<div class='row'><button class='btn' type='button' onclick=\"fetch('/panel?do=reset').then(r=>r.text()).then(alert)\">"
        "Reset display controller</button>"
        "<button class='btn' type='button' onclick=\"fetch('/panel?do=info').then(r=>r.text()).then(alert)\">"
-       "Display diagnostics</button></div>"));
+       "Display diagnostics</button></div>"
+       "<button class='btn' type='button' onclick=\"if(confirm('Reboot the dashboard now?'))"
+       "fetch('/reboot',{method:'POST'}).then(r=>r.text()).then(alert)\">Reboot</button>"));
   page_hint(F("If the picture is shifted (the top shows at the bottom): try the first button, then the second. The "
               "first restarts the stream the board sends to the panel (it also runs every second by itself); the "
               "second re-sends the panel's setup, as at power-on; the third resets the board's display "
@@ -2528,6 +2530,16 @@ void handle_gh_install()
 
 // Setup page: the firmware this board is running, as a .bin (the app
 // image only, as the GitHub release has it - ready to upload again).
+// Setup page, Maintenance -> Display -> Reboot.
+void handle_reboot()
+{
+  if (!web_auth()) return;
+  config_server.send(200, "text/plain", "Rebooting - the page works again in about 20 seconds.");
+  Serial.println("Reboot from the setup page");
+  delay(1000); // let the answer reach the browser
+  ESP.restart();
+}
+
 // Setup page, Maintenance -> Display: fixes for a shifted picture, by hand,
 // to tell which part lost sync. "stream": restart the RGB DMA (the same as
 // rgb_resync_timer_cb()); "init": re-send the ST7701 setup over its SPI pins
@@ -2614,6 +2626,7 @@ void start_config_server()
   config_server.on("/ghinstall", HTTP_POST, handle_gh_install);
   config_server.on("/firmware.bin", HTTP_GET, handle_firmware_download);
   config_server.on("/panel", HTTP_GET, handle_panel);
+  config_server.on("/reboot", HTTP_POST, handle_reboot);
   config_server.on("/scan", handle_scan);
   config_server.on("/save", HTTP_POST, handle_save_post);
   config_server.on("/notify", HTTP_POST, handle_notify);
