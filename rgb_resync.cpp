@@ -15,6 +15,8 @@
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 #include <esp_lcd_panel_rgb.h>
+#include <esp_timer.h>
+#include <stdio.h>
 
 namespace
 {
@@ -38,6 +40,68 @@ void rgb_panel_resync(Arduino_ESP32RGBPanel *panel)
   if (!panel) return;
   esp_lcd_panel_handle_t handle = panel->*private_member(RgbPanelHandle());
   if (handle) esp_lcd_rgb_panel_restart(handle);
+}
+
+// ---- Diagnostics: is the stream in step with the panel? ----
+// Two driver events per frame: "frame buffer complete" (the last line has
+// gone into a bounce buffer) and VSYNC (the panel starts a new frame). In
+// step, they're a fixed time apart; a stream shifted by N lines moves that
+// gap by N line times (~55 us at 10 MHz). The gap from the first seconds
+// after boot - picture still aligned - is kept as the reference.
+static volatile uint32_t diag_vsync = 0, diag_fb_done = 0;
+static volatile int64_t diag_fb_done_us = 0, diag_gap_us = 0, diag_ref_gap_us = 0;
+static volatile uint32_t diag_ref_samples = 0;
+
+static bool IRAM_ATTR diag_on_vsync(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t *, void *)
+{
+  diag_vsync++;
+  int64_t now = esp_timer_get_time();
+  if (diag_fb_done_us)
+  {
+    int64_t gap = now - diag_fb_done_us;
+    diag_gap_us = gap;
+    // Reference: average of the frames between 3 and 10 s after boot.
+    if (now > 3000000 && now < 10000000)
+    {
+      diag_ref_gap_us = (diag_ref_gap_us * diag_ref_samples + gap) / (diag_ref_samples + 1);
+      diag_ref_samples++;
+    }
+  }
+  return false;
+}
+
+static bool IRAM_ATTR diag_on_fb_done(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t *, void *)
+{
+  diag_fb_done++;
+  diag_fb_done_us = esp_timer_get_time();
+  return false;
+}
+
+bool rgb_panel_diag_start(Arduino_ESP32RGBPanel *panel)
+{
+  if (!panel) return false;
+  esp_lcd_panel_handle_t handle = panel->*private_member(RgbPanelHandle());
+  if (!handle) return false;
+  esp_lcd_rgb_panel_event_callbacks_t cbs = {};
+  cbs.on_vsync = diag_on_vsync;
+  cbs.on_frame_buf_complete = diag_on_fb_done;
+  return esp_lcd_rgb_panel_register_event_callbacks(handle, &cbs, NULL) == ESP_OK;
+}
+
+// One line for the setup page. Waits a second to count the events.
+void rgb_panel_diag(Arduino_ESP32RGBPanel *panel, char *out, size_t n)
+{
+  esp_lcd_panel_handle_t handle = panel ? panel->*private_member(RgbPanelHandle()) : NULL;
+  uint32_t v0 = diag_vsync, f0 = diag_fb_done;
+  vTaskDelay(pdMS_TO_TICKS(1000));
+  uint32_t v = diag_vsync - v0, f = diag_fb_done - f0;
+  esp_err_t r = handle ? esp_lcd_rgb_panel_restart(handle) : ESP_ERR_INVALID_ARG;
+  long gap = (long)diag_gap_us, ref = (long)diag_ref_gap_us;
+  snprintf(out, n,
+           "VSYNC: %lu/s, frame done: %lu/s\nGap frame done -> VSYNC: %ld us (at boot %ld us, %lu frames)\n"
+           "Difference: %ld us = about %ld lines\nStream restart call: %s",
+           (unsigned long)v, (unsigned long)f, gap, ref, (unsigned long)diag_ref_samples, gap - ref, (gap - ref) / 55,
+           r == ESP_OK ? "ESP_OK" : esp_err_to_name(r));
 }
 
 // Stronger: resets the LCD controller and sets it up again - the same two

@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.43"
+#define FW_VERSION "3.44"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -144,6 +144,8 @@ Arduino_RGB_Display *gfx = new Arduino_RGB_Display(
 // Re-aligns the panel after a bounce-buffer underrun (see rgb_resync.cpp).
 void rgb_panel_resync(Arduino_ESP32RGBPanel *panel);
 bool rgb_panel_full_reset(Arduino_ESP32RGBPanel *panel);
+bool rgb_panel_diag_start(Arduino_ESP32RGBPanel *panel);
+void rgb_panel_diag(Arduino_ESP32RGBPanel *panel, char *out, size_t n);
 // Set by the setup page, done by loop() (not mid-draw): rgb_panel_full_reset().
 static volatile bool panel_reset_request = false;
 #define RGB_RESYNC_INTERVAL_MS 1000
@@ -1964,8 +1966,10 @@ void send_settings_page()
        "Restart picture stream</button>"
        "<button class='btn' type='button' onclick=\"fetch('/panel?do=init').then(r=>r.text()).then(alert)\">"
        "Re-initialise panel</button></div>"
-       "<button class='btn' type='button' onclick=\"fetch('/panel?do=reset').then(r=>r.text()).then(alert)\">"
-       "Reset display controller</button>"));
+       "<div class='row'><button class='btn' type='button' onclick=\"fetch('/panel?do=reset').then(r=>r.text()).then(alert)\">"
+       "Reset display controller</button>"
+       "<button class='btn' type='button' onclick=\"fetch('/panel?do=info').then(r=>r.text()).then(alert)\">"
+       "Display diagnostics</button></div>"));
   page_hint(F("If the picture is shifted (the top shows at the bottom): try the first button, then the second. The "
               "first restarts the stream the board sends to the panel (it also runs every second by itself); the "
               "second re-sends the panel's setup, as at power-on; the third resets the board's display "
@@ -2550,7 +2554,14 @@ void handle_panel()
     panel_reset_request = true; // loop(): between draws
     config_server.send(200, "text/plain", "Display controller reset. Is the picture back in place?");
   }
-  else config_server.send(400, "text/plain", "do=stream, do=init or do=reset");
+  else if (what == "info")
+  {
+    char txt[320];
+    rgb_panel_diag(rgbpanel, txt, sizeof(txt));
+    Serial.printf("[Panel] %s\n", txt);
+    config_server.send(200, "text/plain", txt);
+  }
+  else config_server.send(400, "text/plain", "do=stream, do=init, do=reset or do=info");
 }
 
 void handle_firmware_download()
@@ -4148,6 +4159,7 @@ void setup()
   Serial.println("Initializing display...");
   gfx->begin(16000000);
   Serial.println("Display begin() complete");
+  Serial.printf("[Panel] diagnostics callbacks: %s\n", rgb_panel_diag_start(rgbpanel) ? "ok" : "FAILED");
 
   delay(500);
   gfx->fillScreen(BLACK);
