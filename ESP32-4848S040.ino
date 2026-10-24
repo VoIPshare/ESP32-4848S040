@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.46"
+#define FW_VERSION "3.47"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -146,6 +146,10 @@ void rgb_panel_resync(Arduino_ESP32RGBPanel *panel);
 bool rgb_panel_full_reset(Arduino_ESP32RGBPanel *panel);
 bool rgb_panel_diag_start(Arduino_ESP32RGBPanel *panel);
 void rgb_panel_diag(Arduino_ESP32RGBPanel *panel, char *out, size_t n);
+void rgb_panel_resync_if_needed(Arduino_ESP32RGBPanel *panel);
+void rgb_panel_signal_pause(int pclk_gpio, uint32_t ms);
+#define RGB_PCLK_GPIO 21
+static volatile bool panel_pause_request = false; // setup page -> loop(): rgb_panel_signal_pause()
 // Set by the setup page, done by loop() (not mid-draw): rgb_panel_full_reset().
 static volatile bool panel_reset_request = false;
 #define RGB_RESYNC_INTERVAL_MS 1000
@@ -433,14 +437,16 @@ struct DeviceSettings
 };
 static DeviceSettings settings;
 
-// A shifted picture (40 lines rolled up) recovers within a second: the
-// resync runs on an esp_timer, not on the LVGL loop, so it still happens
-// while loop() is busy (a long redraw, waiting on data_lock()). The restart
-// only takes effect at the next VSYNC, so this is safe from that task and
-// changes nothing while the picture is aligned.
+// A stream shifted by an underrun (40 lines rolled up) recovers within a
+// second: every second, on an esp_timer (not the LVGL loop, so it also
+// runs while loop() is busy), the stream's timing is compared with the one
+// measured right after boot, and only when it's out of step is the stream
+// restarted. It used to restart blindly every 1-2 s; each restart briefly
+// disturbs the signal, which is a suspect for the panel occasionally
+// showing the picture from the wrong line (only a reboot cleared that).
 static void rgb_resync_timer_cb(void *arg)
 {
-  rgb_panel_resync(rgbpanel);
+  rgb_panel_resync_if_needed(rgbpanel);
 }
 
 void rgb_resync_timer_start()
@@ -744,7 +750,7 @@ static uint8_t pending_screen = 0;
 
 void blackout_reveal_cb(lv_timer_t *timer)
 {
-  rgb_panel_resync(rgbpanel); // while the screen is black anyway
+  rgb_panel_resync_if_needed(rgbpanel); // while the screen is black anyway; only when out of step
   switch_screen(pending_screen, LV_SCR_LOAD_ANIM_NONE);
   lv_obj_add_flag(blackout_overlay, LV_OBJ_FLAG_HIDDEN);
 }
@@ -1972,6 +1978,8 @@ void send_settings_page()
        "Display diagnostics</button></div>"
        "<button class='btn' type='button' onclick=\"fetch('/panel?do=swreset').then(r=>r.text()).then(alert)\">"
        "Panel software reset</button>"
+       "<button class='btn' type='button' onclick=\"fetch('/panel?do=pause').then(r=>r.text()).then(alert)\">"
+       "Stop panel signal 1.5 s</button>"
        "<button class='btn' type='button' onclick=\"if(confirm('Reboot the dashboard now?'))"
        "fetch('/reboot',{method:'POST'}).then(r=>r.text()).then(alert)\">Reboot</button>"));
   page_hint(F("If the picture is shifted (the top shows at the bottom): try the first button, then the second. The "
@@ -2574,6 +2582,11 @@ void handle_panel()
     rgb_panel_resync(rgbpanel);
     Serial.println("[Panel] software reset + setup (setup page)");
     config_server.send(200, "text/plain", "Panel reset and set up again. Is the picture back in place?");
+  }
+  else if (what == "pause")
+  {
+    panel_pause_request = true; // loop(): stops the pixel clock 1.5 s
+    config_server.send(200, "text/plain", "Panel signal stopped for 1.5 s and given back. Is the picture back in place?");
   }
   else if (what == "reset")
   {
@@ -4467,6 +4480,14 @@ void loop()
   if (ami_take_status_refresh()) phone_apply_to_ui();
   if (jf_take_ui_refresh()) { home_media_apply(); jf_apply_to_ui(); }
   if (notify_pending) { notify_pending = false; notify_apply_to_ui(); }
+  if (panel_pause_request)
+  {
+    panel_pause_request = false;
+    Serial.println("[Panel] pixel clock paused 1.5 s (setup page)");
+    rgb_panel_signal_pause(RGB_PCLK_GPIO, 1500);
+    rgb_panel_resync(rgbpanel);
+    lv_obj_invalidate(lv_scr_act());
+  }
   if (panel_reset_request)
   {
     panel_reset_request = false;

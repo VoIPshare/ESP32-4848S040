@@ -17,6 +17,9 @@
 #include <esp_lcd_panel_rgb.h>
 #include <esp_timer.h>
 #include <stdio.h>
+#include <driver/gpio.h>
+#include <esp_rom_gpio.h>
+#include <soc/gpio_sig_map.h>
 
 namespace
 {
@@ -51,6 +54,36 @@ void rgb_panel_resync(Arduino_ESP32RGBPanel *panel)
 static volatile uint32_t diag_vsync = 0, diag_fb_done = 0;
 static volatile int64_t diag_fb_done_us = 0, diag_gap_us = 0, diag_ref_gap_us = 0;
 static volatile uint32_t diag_ref_samples = 0;
+static volatile uint32_t diag_auto_restarts = 0;
+
+// True once the boot reference is in and the stream is more than 5 lines
+// (~55 us each) away from it - then a restart is worth doing; otherwise
+// leave the stream alone (a restart briefly disturbs the signal).
+bool rgb_panel_stream_offset()
+{
+  if (diag_ref_samples < 50 || esp_timer_get_time() < 10000000) return false;
+  int64_t d = diag_gap_us - diag_ref_gap_us;
+  return d > 5 * 55 || d < -5 * 55;
+}
+
+// rgb_resync_timer_cb(): restart only when the stream is measured out of step.
+void rgb_panel_resync_if_needed(Arduino_ESP32RGBPanel *panel)
+{
+  if (!rgb_panel_stream_offset()) return;
+  diag_auto_restarts++;
+  rgb_panel_resync(panel);
+}
+
+// Stops the pixel clock for ms (the panel loses its signal, as during a
+// reboot), then gives it back to the LCD controller. Blocks for ms.
+void rgb_panel_signal_pause(int pclk_gpio, uint32_t ms)
+{
+  esp_rom_gpio_connect_out_signal(pclk_gpio, SIG_GPIO_OUT_IDX, false, false);
+  gpio_set_direction((gpio_num_t)pclk_gpio, GPIO_MODE_OUTPUT);
+  gpio_set_level((gpio_num_t)pclk_gpio, 0);
+  vTaskDelay(pdMS_TO_TICKS(ms));
+  esp_rom_gpio_connect_out_signal(pclk_gpio, LCD_PCLK_IDX, false, false);
+}
 
 static bool IRAM_ATTR diag_on_vsync(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t *, void *)
 {
@@ -99,9 +132,9 @@ void rgb_panel_diag(Arduino_ESP32RGBPanel *panel, char *out, size_t n)
   long gap = (long)diag_gap_us, ref = (long)diag_ref_gap_us;
   snprintf(out, n,
            "VSYNC: %lu/s, frame done: %lu/s\nGap frame done -> VSYNC: %ld us (at boot %ld us, %lu frames)\n"
-           "Difference: %ld us = about %ld lines\nStream restart call: %s",
+           "Difference: %ld us = about %ld lines\nStream restart call: %s\nAutomatic restarts since boot: %lu",
            (unsigned long)v, (unsigned long)f, gap, ref, (unsigned long)diag_ref_samples, gap - ref, (gap - ref) / 55,
-           r == ESP_OK ? "ESP_OK" : esp_err_to_name(r));
+           r == ESP_OK ? "ESP_OK" : esp_err_to_name(r), (unsigned long)diag_auto_restarts);
 }
 
 // Stronger: resets the LCD controller and sets it up again - the same two
