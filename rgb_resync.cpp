@@ -74,6 +74,25 @@ void rgb_panel_resync_if_needed(Arduino_ESP32RGBPanel *panel)
   rgb_panel_resync(panel);
 }
 
+// Detaches (on = false: held low) or gives back (on = true) the panel's
+// timing signals - pixel clock, HSYNC, VSYNC and DE - from/to the LCD
+// controller, as the pins are idle during a reboot.
+void rgb_panel_signals(bool on, int de, int vsync, int hsync, int pclk)
+{
+  const int pins[4] = {de, vsync, hsync, pclk};
+  const int sigs[4] = {LCD_H_ENABLE_IDX, LCD_V_SYNC_IDX, LCD_H_SYNC_IDX, LCD_PCLK_IDX};
+  for (int i = 0; i < 4; i++)
+  {
+    if (on) esp_rom_gpio_connect_out_signal(pins[i], sigs[i], false, false);
+    else
+    {
+      esp_rom_gpio_connect_out_signal(pins[i], SIG_GPIO_OUT_IDX, false, false);
+      gpio_set_direction((gpio_num_t)pins[i], GPIO_MODE_OUTPUT);
+      gpio_set_level((gpio_num_t)pins[i], 0);
+    }
+  }
+}
+
 // Stops the pixel clock for ms (the panel loses its signal, as during a
 // reboot), then gives it back to the LCD controller. Blocks for ms.
 void rgb_panel_signal_pause(int pclk_gpio, uint32_t ms)

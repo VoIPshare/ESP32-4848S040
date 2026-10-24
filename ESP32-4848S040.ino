@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.47"
+#define FW_VERSION "3.48"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -148,6 +148,8 @@ bool rgb_panel_diag_start(Arduino_ESP32RGBPanel *panel);
 void rgb_panel_diag(Arduino_ESP32RGBPanel *panel, char *out, size_t n);
 void rgb_panel_resync_if_needed(Arduino_ESP32RGBPanel *panel);
 void rgb_panel_signal_pause(int pclk_gpio, uint32_t ms);
+void rgb_panel_signals(bool on, int de, int vsync, int hsync, int pclk);
+static volatile bool panel_boot_request = false; // setup page -> loop(): panel_boot_sequence()
 #define RGB_PCLK_GPIO 21
 static volatile bool panel_pause_request = false; // setup page -> loop(): rgb_panel_signal_pause()
 // Set by the setup page, done by loop() (not mid-draw): rgb_panel_full_reset().
@@ -1980,6 +1982,8 @@ void send_settings_page()
        "Panel software reset</button>"
        "<button class='btn' type='button' onclick=\"fetch('/panel?do=pause').then(r=>r.text()).then(alert)\">"
        "Stop panel signal 1.5 s</button>"
+       "<button class='btn pri' type='button' onclick=\"fetch('/panel?do=boot').then(r=>r.text()).then(alert)\">"
+       "Restart panel as at boot</button>"
        "<button class='btn' type='button' onclick=\"if(confirm('Reboot the dashboard now?'))"
        "fetch('/reboot',{method:'POST'}).then(r=>r.text()).then(alert)\">Reboot</button>"));
   page_hint(F("If the picture is shifted (the top shows at the bottom): try the first button, then the second. The "
@@ -2540,6 +2544,24 @@ void handle_gh_install()
 
 // Setup page: the firmware this board is running, as a .bin (the app
 // image only, as the GitHub release has it - ready to upload again).
+// The display's start-up order at boot, without rebooting: the panel's
+// signals stop (pins idle, as during a reboot), the ST7701 is reset and
+// set up while there's no picture signal, then the signals come back and
+// the stream restarts from the top. loop() only (blocks ~1 s).
+void panel_boot_sequence()
+{
+  Serial.println("[Panel] boot sequence: signals off, reset + setup, signals on");
+  rgb_panel_signals(false, 18, 17, 16, RGB_PCLK_GPIO); // DE, VSYNC, HSYNC, PCLK - see rgbpanel
+  delay(300);
+  static const uint8_t swreset[] = {BEGIN_WRITE, WRITE_COMMAND_8, 0x01, END_WRITE, DELAY, 150};
+  bus->batchOperation((uint8_t *)swreset, sizeof(swreset));
+  bus->batchOperation((uint8_t *)st7701_type9_init_operations, sizeof(st7701_type9_init_operations));
+  delay(100);
+  rgb_panel_signals(true, 18, 17, 16, RGB_PCLK_GPIO);
+  rgb_panel_resync(rgbpanel);
+  lv_obj_invalidate(lv_scr_act());
+}
+
 // Setup page, Maintenance -> Display -> Reboot.
 void handle_reboot()
 {
@@ -2582,6 +2604,11 @@ void handle_panel()
     rgb_panel_resync(rgbpanel);
     Serial.println("[Panel] software reset + setup (setup page)");
     config_server.send(200, "text/plain", "Panel reset and set up again. Is the picture back in place?");
+  }
+  else if (what == "boot")
+  {
+    panel_boot_request = true; // loop(): panel_boot_sequence()
+    config_server.send(200, "text/plain", "Panel restarted as at boot (signals off, reset, setup, signals on). Is the picture back in place?");
   }
   else if (what == "pause")
   {
@@ -4480,6 +4507,11 @@ void loop()
   if (ami_take_status_refresh()) phone_apply_to_ui();
   if (jf_take_ui_refresh()) { home_media_apply(); jf_apply_to_ui(); }
   if (notify_pending) { notify_pending = false; notify_apply_to_ui(); }
+  if (panel_boot_request)
+  {
+    panel_boot_request = false;
+    panel_boot_sequence();
+  }
   if (panel_pause_request)
   {
     panel_pause_request = false;
