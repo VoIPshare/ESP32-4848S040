@@ -55,6 +55,7 @@ static volatile uint32_t diag_vsync = 0, diag_fb_done = 0;
 static volatile int64_t diag_fb_done_us = 0, diag_gap_us = 0, diag_ref_gap_us = 0;
 static volatile uint32_t diag_ref_samples = 0;
 static volatile uint32_t diag_auto_restarts = 0;
+static volatile int64_t diag_last_restart_us = 0;
 
 // True once the boot reference is in and the stream is more than 5 lines
 // (~55 us each) away from it - then a restart is worth doing; otherwise
@@ -63,14 +64,25 @@ bool rgb_panel_stream_offset()
 {
   if (diag_ref_samples < 50 || esp_timer_get_time() < 10000000) return false;
   int64_t d = diag_gap_us - diag_ref_gap_us;
-  return d > 5 * 55 || d < -5 * 55;
+  return d > 5 * 70 || d < -5 * 70; // 5 lines (a line is ~55 us at 10 MHz, ~70 us at 8 MHz)
 }
 
-// rgb_resync_timer_cb(): restart only when the stream is measured out of step.
-void rgb_panel_resync_if_needed(Arduino_ESP32RGBPanel *panel)
+// rgb_resync_timer_cb(), once a second: restart only when the stream is
+// out of step 3 checks in a row. A real offset stays until it's repaired;
+// a delayed interrupt only skews one measurement - restarting on those (137
+// times in 2 hours) kept disturbing the signal. checks_needed 1: right away.
+static uint8_t diag_out_of_step = 0;
+void rgb_panel_resync_if_needed(Arduino_ESP32RGBPanel *panel, uint8_t checks_needed)
 {
-  if (!rgb_panel_stream_offset()) return;
+  if (!rgb_panel_stream_offset())
+  {
+    diag_out_of_step = 0;
+    return;
+  }
+  if (++diag_out_of_step < checks_needed) return;
+  diag_out_of_step = 0;
   diag_auto_restarts++;
+  diag_last_restart_us = esp_timer_get_time();
   rgb_panel_resync(panel);
 }
 
@@ -149,11 +161,19 @@ void rgb_panel_diag(Arduino_ESP32RGBPanel *panel, char *out, size_t n)
   uint32_t v = diag_vsync - v0, f = diag_fb_done - f0;
   esp_err_t r = handle ? esp_lcd_rgb_panel_restart(handle) : ESP_ERR_INVALID_ARG;
   long gap = (long)diag_gap_us, ref = (long)diag_ref_gap_us;
+  // One line: (480 + porches) pixel clocks; the frame time / 518 lines works for any clock.
+  long line_us = v ? 1000000L / (long)v / 518 : 55;
+  if (line_us < 1) line_us = 1;
+  char last[40] = "";
+  if (diag_last_restart_us)
+    snprintf(last, sizeof(last), " (last %lu min ago)", (unsigned long)((esp_timer_get_time() - diag_last_restart_us) / 60000000));
   snprintf(out, n,
            "VSYNC: %lu/s, frame done: %lu/s\nGap frame done -> VSYNC: %ld us (at boot %ld us, %lu frames)\n"
-           "Difference: %ld us = about %ld lines\nStream restart call: %s\nAutomatic restarts since boot: %lu",
-           (unsigned long)v, (unsigned long)f, gap, ref, (unsigned long)diag_ref_samples, gap - ref, (gap - ref) / 55,
-           r == ESP_OK ? "ESP_OK" : esp_err_to_name(r), (unsigned long)diag_auto_restarts);
+           "Difference: %ld us = about %ld lines\nStream restart call: %s\nAutomatic restarts since boot: %lu%s\n"
+           "Uptime: %lu min",
+           (unsigned long)v, (unsigned long)f, gap, ref, (unsigned long)diag_ref_samples, gap - ref, (gap - ref) / line_us,
+           r == ESP_OK ? "ESP_OK" : esp_err_to_name(r), (unsigned long)diag_auto_restarts, last,
+           (unsigned long)(esp_timer_get_time() / 60000000));
 }
 
 // Stronger: resets the LCD controller and sets it up again - the same two

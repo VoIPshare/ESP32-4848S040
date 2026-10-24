@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.48"
+#define FW_VERSION "3.49"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -131,8 +131,11 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
     4 /* B0 */, 5 /* B1 */, 6 /* B2 */, 7 /* B3 */, 15 /* B4 */,
     1 /* hsync_polarity */, 10 /* hsync_front_porch */, 8 /* hsync_pulse_width */, 50 /* hsync_back_porch */,
     1 /* vsync_polarity */, 10 /* vsync_front_porch */, 8 /* vsync_pulse_width */, 20 /* vsync_back_porch */,
-    0 /* pclk_active_neg */, 10000000 /* prefer_speed: 10 MHz (~35 fps) - was 12 MHz; less PSRAM bandwidth per
-                                            frame leaves more headroom for Wi-Fi/TLS, see rgb_resync.cpp */, false /* useBigEndian */,
+    0 /* pclk_active_neg */, 8000000 /* prefer_speed: 8 MHz (~28 fps) - was 12, then 10 MHz; less PSRAM bandwidth
+                                           per frame leaves more headroom for Wi-Fi/TLS. At 10 MHz the stream still
+                                           underran every ~15 min (Display diagnostics), and one of those
+                                           occasionally left the panel showing the picture from the wrong line
+                                           until a reboot - see rgb_resync.cpp */, false /* useBigEndian */,
     0 /* de_idle_high */, 0 /* pclk_idle_high */,
     480 * 40 /* bounce_buffer_size_px: reduce tearing on full-screen swaps - bumped from 480*10
                 since network activity (WiFi/TLS competing for PSRAM bandwidth) was starving the
@@ -146,7 +149,7 @@ void rgb_panel_resync(Arduino_ESP32RGBPanel *panel);
 bool rgb_panel_full_reset(Arduino_ESP32RGBPanel *panel);
 bool rgb_panel_diag_start(Arduino_ESP32RGBPanel *panel);
 void rgb_panel_diag(Arduino_ESP32RGBPanel *panel, char *out, size_t n);
-void rgb_panel_resync_if_needed(Arduino_ESP32RGBPanel *panel);
+void rgb_panel_resync_if_needed(Arduino_ESP32RGBPanel *panel, uint8_t checks_needed);
 void rgb_panel_signal_pause(int pclk_gpio, uint32_t ms);
 void rgb_panel_signals(bool on, int de, int vsync, int hsync, int pclk);
 static volatile bool panel_boot_request = false; // setup page -> loop(): panel_boot_sequence()
@@ -448,7 +451,7 @@ static DeviceSettings settings;
 // showing the picture from the wrong line (only a reboot cleared that).
 static void rgb_resync_timer_cb(void *arg)
 {
-  rgb_panel_resync_if_needed(rgbpanel);
+  rgb_panel_resync_if_needed(rgbpanel, 3);
 }
 
 void rgb_resync_timer_start()
@@ -752,7 +755,8 @@ static uint8_t pending_screen = 0;
 
 void blackout_reveal_cb(lv_timer_t *timer)
 {
-  rgb_panel_resync_if_needed(rgbpanel); // while the screen is black anyway; only when out of step
+  // Screen changes don't restart the stream any more: the once-a-second
+  // check does that, and only when it's really out of step.
   switch_screen(pending_screen, LV_SCR_LOAD_ANIM_NONE);
   lv_obj_add_flag(blackout_overlay, LV_OBJ_FLAG_HIDDEN);
 }
