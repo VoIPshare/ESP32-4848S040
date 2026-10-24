@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.45"
+#define FW_VERSION "3.46"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -1970,6 +1970,8 @@ void send_settings_page()
        "Reset display controller</button>"
        "<button class='btn' type='button' onclick=\"fetch('/panel?do=info').then(r=>r.text()).then(alert)\">"
        "Display diagnostics</button></div>"
+       "<button class='btn' type='button' onclick=\"fetch('/panel?do=swreset').then(r=>r.text()).then(alert)\">"
+       "Panel software reset</button>"
        "<button class='btn' type='button' onclick=\"if(confirm('Reboot the dashboard now?'))"
        "fetch('/reboot',{method:'POST'}).then(r=>r.text()).then(alert)\">Reboot</button>"));
   page_hint(F("If the picture is shifted (the top shows at the bottom): try the first button, then the second. The "
@@ -2560,6 +2562,18 @@ void handle_panel()
     rgb_panel_resync(rgbpanel);
     Serial.println("[Panel] re-initialised (setup page)");
     config_server.send(200, "text/plain", "Panel re-initialised. Is the picture back in place?");
+  }
+  else if (what == "swreset")
+  {
+    // The board's stream checks out (Display diagnostics) while the panel
+    // shows the picture from the wrong line: reset the ST7701 itself, as at
+    // power-on - software reset (0x01), 150 ms, then its whole setup again.
+    static const uint8_t swreset[] = {BEGIN_WRITE, WRITE_COMMAND_8, 0x01, END_WRITE, DELAY, 150};
+    bus->batchOperation((uint8_t *)swreset, sizeof(swreset));
+    bus->batchOperation((uint8_t *)st7701_type9_init_operations, sizeof(st7701_type9_init_operations));
+    rgb_panel_resync(rgbpanel);
+    Serial.println("[Panel] software reset + setup (setup page)");
+    config_server.send(200, "text/plain", "Panel reset and set up again. Is the picture back in place?");
   }
   else if (what == "reset")
   {
