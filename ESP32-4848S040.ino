@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.49"
+#define FW_VERSION "3.50"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -153,6 +153,8 @@ void rgb_panel_resync_if_needed(Arduino_ESP32RGBPanel *panel, uint8_t checks_nee
 void rgb_panel_signal_pause(int pclk_gpio, uint32_t ms);
 void rgb_panel_signals(bool on, int de, int vsync, int hsync, int pclk);
 static volatile bool panel_boot_request = false; // setup page -> loop(): panel_boot_sequence()
+bool rgb_panel_rebuild(Arduino_RGB_Display *gfx, Arduino_ESP32RGBPanel *panel, int16_t w, int16_t h);
+static volatile bool panel_rebuild_request = false; // setup page -> loop(): rgb_panel_rebuild()
 #define RGB_PCLK_GPIO 21
 static volatile bool panel_pause_request = false; // setup page -> loop(): rgb_panel_signal_pause()
 // Set by the setup page, done by loop() (not mid-draw): rgb_panel_full_reset().
@@ -1986,8 +1988,10 @@ void send_settings_page()
        "Panel software reset</button>"
        "<button class='btn' type='button' onclick=\"fetch('/panel?do=pause').then(r=>r.text()).then(alert)\">"
        "Stop panel signal 1.5 s</button>"
-       "<button class='btn pri' type='button' onclick=\"fetch('/panel?do=boot').then(r=>r.text()).then(alert)\">"
+       "<button class='btn' type='button' onclick=\"fetch('/panel?do=boot').then(r=>r.text()).then(alert)\">"
        "Restart panel as at boot</button>"
+       "<button class='btn pri' type='button' onclick=\"fetch('/panel?do=rebuild').then(r=>r.text()).then(alert)\">"
+       "Rebuild display driver</button>"
        "<button class='btn' type='button' onclick=\"if(confirm('Reboot the dashboard now?'))"
        "fetch('/reboot',{method:'POST'}).then(r=>r.text()).then(alert)\">Reboot</button>"));
   page_hint(F("If the picture is shifted (the top shows at the bottom): try the first button, then the second. The "
@@ -2608,6 +2612,11 @@ void handle_panel()
     rgb_panel_resync(rgbpanel);
     Serial.println("[Panel] software reset + setup (setup page)");
     config_server.send(200, "text/plain", "Panel reset and set up again. Is the picture back in place?");
+  }
+  else if (what == "rebuild")
+  {
+    panel_rebuild_request = true; // loop(): rgb_panel_rebuild()
+    config_server.send(200, "text/plain", "Display driver rebuilt (as at boot). Is the picture back in place?");
   }
   else if (what == "boot")
   {
@@ -4511,6 +4520,16 @@ void loop()
   if (ami_take_status_refresh()) phone_apply_to_ui();
   if (jf_take_ui_refresh()) { home_media_apply(); jf_apply_to_ui(); }
   if (notify_pending) { notify_pending = false; notify_apply_to_ui(); }
+  if (panel_rebuild_request)
+  {
+    panel_rebuild_request = false;
+    Serial.println("[Panel] rebuilding the display driver (setup page)");
+    bool ok = rgb_panel_rebuild(gfx, rgbpanel, 480, 480);
+    Serial.printf("[Panel] rebuild: %s\n", ok ? "ok" : "FAILED");
+    lv_obj_invalidate(lv_scr_act());
+    lv_obj_invalidate(lv_layer_top());
+    lv_refr_now(NULL);
+  }
   if (panel_boot_request)
   {
     panel_boot_request = false;

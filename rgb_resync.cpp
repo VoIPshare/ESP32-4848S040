@@ -36,6 +36,14 @@ struct RgbPanelHandle
 };
 
 template struct PrivateAccess<RgbPanelHandle, &Arduino_ESP32RGBPanel::_panel_handle>;
+
+struct RgbDisplayFramebuffer
+{
+  typedef uint16_t *Arduino_RGB_Display::*type;
+  friend type private_member(RgbDisplayFramebuffer);
+};
+
+template struct PrivateAccess<RgbDisplayFramebuffer, &Arduino_RGB_Display::_framebuffer>;
 } // namespace
 
 void rgb_panel_resync(Arduino_ESP32RGBPanel *panel)
@@ -174,6 +182,27 @@ void rgb_panel_diag(Arduino_ESP32RGBPanel *panel, char *out, size_t n)
            (unsigned long)v, (unsigned long)f, gap, ref, (unsigned long)diag_ref_samples, gap - ref, (gap - ref) / line_us,
            r == ESP_OK ? "ESP_OK" : esp_err_to_name(r), (unsigned long)diag_auto_restarts, last,
            (unsigned long)(esp_timer_get_time() / 60000000));
+}
+
+// The strongest, short of a reboot: deletes the RGB panel driver (frame
+// buffer, bounce buffers, DMA channel and descriptors) and creates it again,
+// as at boot, then hands the new frame buffer to the display object. The
+// screen is black until LVGL redraws it. If the memory isn't there the
+// driver's own checks reboot the board - which fixes it anyway.
+bool rgb_panel_rebuild(Arduino_RGB_Display *gfx, Arduino_ESP32RGBPanel *panel, int16_t w, int16_t h)
+{
+  if (!gfx || !panel) return false;
+  esp_lcd_panel_handle_t &handle = panel->*private_member(RgbPanelHandle());
+  if (handle)
+  {
+    if (esp_lcd_panel_del(handle) != ESP_OK) return false;
+    handle = NULL;
+  }
+  uint16_t *fb = panel->getFrameBuffer(w, h);
+  if (!fb) return false;
+  gfx->*private_member(RgbDisplayFramebuffer()) = fb;
+  rgb_panel_diag_start(panel);
+  return true;
 }
 
 // Stronger: resets the LCD controller and sets it up again - the same two
