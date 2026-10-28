@@ -208,27 +208,20 @@ int proxmox_offline_count()
   return n;
 }
 
-// From the most recent fetch: the alert banner when a node goes down, and
-// Home's red Proxmox card (weather_slot.ino) while any is offline. Only on
-// a confirmed offline node, never on a failed fetch - a single dropped LAN
+// From the most recent fetch: Home's red Proxmox card (weather_slot.ino)
+// while any node is offline - it is the alert, no banner over the clock;
+// a node going down wakes the screen like an alert would. Only on a
+// confirmed offline node, never on a failed fetch - a single dropped LAN
 // request isn't worth alarming over.
 void update_home_proxmox()
 {
   int offline = proxmox.valid ? proxmox_offline_count() : 0;
 
-  // Alert when a node goes down (not on the first fetch after boot).
+  // Wake the screen when a node goes down (not on the first fetch after boot).
   static int prev_offline = -1;
   if (proxmox.valid)
   {
-    if (prev_offline >= 0 && offline > prev_offline)
-    {
-      const char *name = "A node";
-      for (int i = 0; i < PROXMOX_MAX_NODES; i++)
-        if (proxmox.nodes[i].valid && strcmp(proxmox.nodes[i].status, "online") != 0) { name = proxmox.nodes[i].name; break; }
-      char msg[64];
-      snprintf(msg, sizeof(msg), LV_SYMBOL_WARNING "  Proxmox: %s %s", name, tr(S_OFFLINE));
-      alert_show(msg, lv_color_hex(0xC62828), 60000UL);
-    }
+    if (prev_offline >= 0 && offline > prev_offline) alert_wake();
     prev_offline = offline;
   }
   home_proxmox_apply(offline); // weather_slot.ino

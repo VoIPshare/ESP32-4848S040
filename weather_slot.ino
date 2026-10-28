@@ -142,18 +142,19 @@ void build_home_slot_cards(lv_obj_t *parent)
   lv_obj_set_style_radius(home_print_bar, 2, LV_PART_INDICATOR);
 
   // Proxmox: nodes offline, named; a tap opens the Proxmox screen.
-  home_px_card = slot_card(parent, lv_color_hex(0x3A1A1A));
+  // Same red as the alert banner (alerts.ino): this card is the Proxmox alert.
+  home_px_card = slot_card(parent, lv_color_hex(0xC62828));
   lv_obj_t *srv = lv_img_create(home_px_card);
   lv_img_set_src(srv, &home_icon_server);
-  lv_obj_set_style_img_recolor(srv, lv_color_hex(0xEF5350), LV_PART_MAIN);
+  lv_obj_set_style_img_recolor(srv, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
   lv_obj_set_style_img_recolor_opa(srv, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_align(srv, LV_ALIGN_LEFT_MID, 12, 0);
   slot_label(home_px_card, &lv_font_ui_20, lv_color_hex(0xFFFFFF), 52, 7, 290);
   lv_label_set_text(lv_obj_get_child(home_px_card, -1), "Proxmox");
-  home_px_sub = slot_label(home_px_card, &lv_font_ui_14, lv_color_hex(0xFFAB91), 52, 35, 300);
+  home_px_sub = slot_label(home_px_card, &lv_font_ui_14, lv_color_hex(0xFFE0E0), 52, 35, 300);
   home_px_count = lv_label_create(home_px_card);
   lv_obj_set_style_text_font(home_px_count, &lv_font_ui_28, LV_PART_MAIN);
-  lv_obj_set_style_text_color(home_px_count, lv_color_hex(0xEF5350), LV_PART_MAIN);
+  lv_obj_set_style_text_color(home_px_count, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
   lv_obj_align(home_px_count, LV_ALIGN_RIGHT_MID, -18, 0);
 
   // Big caller ID: the whole weather panel, everything centered.
