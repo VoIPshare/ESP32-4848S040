@@ -74,6 +74,9 @@ WiFiClientSecure bambu_tls;
 PubSubClient bambu_mqtt(bambu_tls);
 static uint32_t bambu_last_attempt_ms = 0;
 #define BAMBU_RECONNECT_INTERVAL_MS 5000
+// After BAMBU_MAX_FAILURES in a row: show "can't connect", but keep trying
+// once a minute - the printer comes back by itself after a router reboot.
+#define BAMBU_GAVE_UP_RETRY_MS (60UL * 1000UL)
 #define BAMBU_MAX_FAILURES 5
 
 // Bambu screen widgets updated live from bambu_apply_to_ui() - populated by
@@ -720,9 +723,16 @@ void bambu_request_info()
 // (gated to once per BAMBU_RECONNECT_INTERVAL_MS); called every loop().
 void bambu_mqtt_maintain()
 {
-  if (!wifi_connected) return;
+  // Wi-Fi back (e.g. after a router reboot): a fresh set of quick attempts.
+  static bool had_wifi = false;
+  if (!wifi_connected) { had_wifi = false; return; }
+  if (!had_wifi)
+  {
+    had_wifi = true;
+    bambu_fail_count = 0;
+    bambu_last_attempt_ms = millis() - BAMBU_GAVE_UP_RETRY_MS;
+  }
   if (settings.printer_ip[0] == '\0' || settings.mqtt_sn[0] == '\0' || settings.mqtt_pass[0] == '\0') return;
-  if (bambu_gave_up) return;
 
   if (bambu_mqtt.connected())
   {
@@ -736,9 +746,10 @@ void bambu_mqtt_maintain()
   }
 
   uint32_t now = millis();
-  if (now - bambu_last_attempt_ms < BAMBU_RECONNECT_INTERVAL_MS) return;
+  if (now - bambu_last_attempt_ms < (bambu_gave_up ? BAMBU_GAVE_UP_RETRY_MS : BAMBU_RECONNECT_INTERVAL_MS)) return;
   bambu_last_attempt_ms = now;
 
+  bambu_tls.stop(); // drop a dead socket from before the drop
   bambu_tls.setInsecure(); // Bambu's local MQTT broker uses a self-signed cert
   // NetworkClientSecure defaults to a 120s TLS handshake timeout - if the
   // printer is unreachable/wrong IP, connect() would block the whole loop()
@@ -757,6 +768,11 @@ void bambu_mqtt_maintain()
     bambu_mqtt.subscribe(topic);
     BAMBU_PRINTLN("[Bambu] MQTT connected");
     bambu_fail_count = 0;
+    if (bambu_gave_up)
+    {
+      bambu_gave_up = false;
+      bambu_needs_ui_refresh = true;
+    }
     bambu_last_refresh_ms = millis();
     bambu_request_pushall();
     bambu_request_info();
@@ -764,12 +780,12 @@ void bambu_mqtt_maintain()
   else
   {
     BAMBU_PRINTF("[Bambu] MQTT connect failed, rc=%d\n", bambu_mqtt.state());
-    bambu_fail_count++;
-    if (bambu_fail_count >= BAMBU_MAX_FAILURES)
+    if (bambu_fail_count < 255) bambu_fail_count++;
+    if (bambu_fail_count >= BAMBU_MAX_FAILURES && !bambu_gave_up)
     {
       bambu_gave_up = true;
       bambu_needs_ui_refresh = true;
-      BAMBU_PRINTLN("[Bambu] Giving up after 5 failed attempts");
+      BAMBU_PRINTLN("[Bambu] 5 failed attempts - retrying once a minute");
     }
   }
 }
