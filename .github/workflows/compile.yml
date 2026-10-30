@@ -1,6 +1,14 @@
 name: Compile ESP32-4848S040
 
 on:
+  # Every push to main builds and publishes firmware-<FW_VERSION> (the board
+  # updates itself from it), unless it only touches docs or screenshots.
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'Screenshot/**'
+      - 'images/**'
   workflow_dispatch:
 
 env:
