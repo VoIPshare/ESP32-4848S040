@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.52"
+#define FW_VERSION "3.54"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -1028,6 +1028,7 @@ static char ap_password[9] = "";
 static Preferences prefs;
 static volatile bool wifi_got_ip = false;
 static bool wifi_connected = false;
+static uint32_t wifi_last_attempt_ms = 0; // connect_saved_wifi()/wifi_reconnect_maintain()
 
 // Wi-Fi signal indicator state - sampled in network_task, applied to the
 // bars/strike (wifi_bars/wifi_no_signal_line above) by
@@ -3040,7 +3041,40 @@ void connect_saved_wifi()
   // re-add - 15dBm is still plenty for typical home Wi-Fi range.
   WiFi.setTxPower(WIFI_POWER_15dBm);
   WiFi.begin(settings.sta_ssid, settings.sta_pass);
+  wifi_last_attempt_ms = millis();
   Serial.printf("Connecting to Wi-Fi: %s\n", settings.sta_ssid);
+}
+
+// Our own reconnect watchdog, run from network_task. The core's
+// auto-reconnect gives up on some disconnect reasons (e.g. AUTH_FAIL from an
+// AP that is still booting after a router reboot), and never retries at all
+// when the link comes up but DHCP never answers (no disconnect event). So
+// while there's no IP: re-begin every WIFI_RETRY_MS, and after
+// WIFI_RADIO_CYCLE_MS offline also power-cycle the radio (skipped while the
+// setup AP is on - WIFI_OFF would drop it).
+#define WIFI_RETRY_MS (30UL * 1000UL)
+#define WIFI_RADIO_CYCLE_MS (5UL * 60UL * 1000UL)
+static void wifi_reconnect_maintain()
+{
+  static uint32_t offline_since_ms = 0;
+  if (wifi_connected || settings.sta_ssid[0] == '\0') { offline_since_ms = 0; return; }
+  uint32_t now = millis();
+  if (offline_since_ms == 0) offline_since_ms = now;
+  if (now - wifi_last_attempt_ms < WIFI_RETRY_MS) return;
+  if (!ap_enabled && now - offline_since_ms > WIFI_RADIO_CYCLE_MS)
+  {
+    Serial.println("[WiFi] offline too long - power-cycling the radio");
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    offline_since_ms = now;
+    connect_saved_wifi();
+    return;
+  }
+  Serial.printf("[WiFi] still offline (status %d) - retrying\n", WiFi.status());
+  WiFi.disconnect(false);
+  WiFi.begin(settings.sta_ssid, settings.sta_pass);
+  wifi_last_attempt_ms = now;
 }
 
 // Runs on the Wi-Fi driver's own task, not the LVGL loop - so it only sets a
@@ -3061,6 +3095,10 @@ void on_wifi_event(WiFiEvent_t event, WiFiEventInfo_t info)
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       Serial.printf("Wi-Fi disconnected (reason %d)\n", info.wifi_sta_disconnected.reason);
+      wifi_connected = false;
+      break;
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP:
+      Serial.println("Wi-Fi lost its IP");
       wifi_connected = false;
       break;
     default:
@@ -4206,6 +4244,7 @@ void network_task(void *param)
     if (wifi_connected) direct_fetch_maintain();
     if (wifi_connected && millis() - last_proxmox_fetch_ms > PROXMOX_FETCH_INTERVAL_MS) proxmox_fetch();
     if (millis() - last_wifi_signal_sample_ms > WIFI_SIGNAL_SAMPLE_INTERVAL_MS) wifi_signal_sample();
+    wifi_reconnect_maintain();
     bambu_mqtt_maintain();
     if (wifi_connected && clock_synced_once) gh_update_maintain();
     if (wifi_connected) ha_maintain();

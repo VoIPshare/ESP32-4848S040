@@ -26,6 +26,7 @@ static lv_obj_t *home_px_card = NULL, *home_px_sub = NULL, *home_px_count = NULL
 static bool px_offline = false; // the Proxmox card has something to show // the printing card has something to show (printing, finished, error)
 static lv_obj_t *home_call_big = NULL, *home_call_big_name = NULL, *home_call_big_num = NULL;
 static lv_obj_t *vm_icon = NULL, *vm_icon_lab = NULL; // every screen, next to the Wi-Fi icon
+static lv_obj_t *problem_icon = NULL, *problem_icon_lab = NULL; // same row: a red warning while something's wrong
 static uint32_t call_shown_ms = 0, call_ringing_ms = 0; // when it started / was last seen ringing
 static bool call_showing = false;
 static bool media_playing = false;
@@ -196,7 +197,24 @@ void build_home_slot_cards(lv_obj_t *parent)
   lv_obj_add_flag(vm_icon, LV_OBJ_FLAG_HIDDEN);
   vm_icon_update();
 
+  // Problems: a red warning with how many there are, in the same row (left
+  // of the envelope / Wi-Fi icon), on every screen - Proxmox nodes offline,
+  // the printer unreachable. See problem_count().
+  problem_icon = make_pill(lv_layer_top(), "", lv_color_hex(0xC62828), lv_color_hex(0xFFFFFF), &problem_icon_lab);
+  lv_obj_set_pos(problem_icon, 360, 8); // placed by weather_slot_tick()
+  lv_obj_clear_flag(problem_icon, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(problem_icon, LV_OBJ_FLAG_HIDDEN);
+
   lv_timer_create(weather_slot_tick, 500, NULL);
+}
+
+// What the red top-row warning counts: each offline Proxmox node, and the
+// printer when it can't be reached (bambu_gave_up).
+static int problem_count()
+{
+  int n = proxmox.valid ? proxmox_offline_count() : 0;
+  if (bambu_gave_up) n++;
+  return n;
 }
 
 // Shows exactly one of the stats row, the call card and the media card.
@@ -213,6 +231,25 @@ static void weather_slot_tick(lv_timer_t *t)
     // Not over the Settings screen's own top-right status text.
     bool hide = !ami_configured() || in_settings || vm_new_total <= 0;
     if (hide != lv_obj_has_flag(vm_icon, LV_OBJ_FLAG_HIDDEN)) (hide ? lv_obj_add_flag : lv_obj_clear_flag)(vm_icon, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (problem_icon)
+  {
+    static int shown_problems = -1;
+    int problems = problem_count();
+    if (problems != shown_problems)
+    {
+      shown_problems = problems;
+      lv_label_set_text_fmt(problem_icon_lab, LV_SYMBOL_WARNING " %d", problems);
+      lv_obj_update_layout(problem_icon);
+    }
+    bool wifi_shown = wifi_signal_box && !lv_obj_has_flag(wifi_signal_box, LV_OBJ_FLAG_HIDDEN);
+    bool vm_shown = vm_icon && !lv_obj_has_flag(vm_icon, LV_OBJ_FLAG_HIDDEN);
+    lv_coord_t right = 480 - 10 - (wifi_shown ? 34 + 8 : 0) - (vm_shown ? lv_obj_get_width(vm_icon) + 8 : 0);
+    lv_coord_t w = lv_obj_get_width(problem_icon), h = lv_obj_get_height(problem_icon);
+    lv_coord_t x = right - w, y = 21 - h / 2;
+    if (lv_obj_get_x(problem_icon) != x || lv_obj_get_y(problem_icon) != y) lv_obj_set_pos(problem_icon, x, y);
+    bool hide = in_settings || problems <= 0;
+    if (hide != lv_obj_has_flag(problem_icon, LV_OBJ_FLAG_HIDDEN)) (hide ? lv_obj_add_flag : lv_obj_clear_flag)(problem_icon, LV_OBJ_FLAG_HIDDEN);
   }
   if (call_showing)
   {
