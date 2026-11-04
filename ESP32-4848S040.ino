@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.54"
+#define FW_VERSION "3.55"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -1029,6 +1029,13 @@ static Preferences prefs;
 static volatile bool wifi_got_ip = false;
 static bool wifi_connected = false;
 static uint32_t wifi_last_attempt_ms = 0; // connect_saved_wifi()/wifi_reconnect_maintain()
+// Outage timing for the Settings info line (set in on_wifi_event()):
+// down-since while offline (0 = since boot), plus the last outage's length
+// and when it ended once back online.
+static volatile uint32_t wifi_down_since_ms = 0;
+static volatile uint32_t wifi_last_outage_ms = 0;
+static volatile uint32_t wifi_back_at_ms = 0;
+static volatile bool wifi_ever_connected = false;
 
 // Wi-Fi signal indicator state - sampled in network_task, applied to the
 // bars/strike (wifi_bars/wifi_no_signal_line above) by
@@ -3090,15 +3097,23 @@ void on_wifi_event(WiFiEvent_t event, WiFiEventInfo_t info)
                      WiFi.subnetMask().toString().c_str(),
                      WiFi.dnsIP(0).toString().c_str(),
                      WiFi.dnsIP(1).toString().c_str());
+      if (!wifi_connected && wifi_ever_connected)
+      {
+        wifi_last_outage_ms = millis() - wifi_down_since_ms;
+        wifi_back_at_ms = millis();
+      }
+      wifi_ever_connected = true;
       wifi_got_ip = true;
       wifi_connected = true;
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       Serial.printf("Wi-Fi disconnected (reason %d)\n", info.wifi_sta_disconnected.reason);
+      if (wifi_connected) wifi_down_since_ms = millis();
       wifi_connected = false;
       break;
     case ARDUINO_EVENT_WIFI_STA_LOST_IP:
       Serial.println("Wi-Fi lost its IP");
+      if (wifi_connected) wifi_down_since_ms = millis();
       wifi_connected = false;
       break;
     default:
@@ -3190,7 +3205,17 @@ void settings_close_cb(lv_event_t *e)
 }
 
 // Fires after the touch driver's long_press_time (set to 5s in setup()).
-// "v3.6" over "192.168.1.23 - -58 dBm" (or "Wi-Fi not connected").
+// "45s", "12m 30s", "3h 05m", "2d 4h".
+static void fmt_duration(char *out, size_t len, uint32_t ms)
+{
+  uint32_t s = ms / 1000UL;
+  if (s < 60) snprintf(out, len, "%lus", (unsigned long)s);
+  else if (s < 3600) snprintf(out, len, "%lum %02lus", (unsigned long)(s / 60), (unsigned long)(s % 60));
+  else if (s < 86400) snprintf(out, len, "%luh %02lum", (unsigned long)(s / 3600), (unsigned long)(s / 60 % 60));
+  else snprintf(out, len, "%lud %luh", (unsigned long)(s / 86400), (unsigned long)(s / 3600 % 24));
+}
+
+// "v3.6" over "192.168.1.23 - -58 dBm" (or "Wi-Fi down for 4m 10s").
 void settings_info_update()
 {
   if (!settings_info_lab) return;
@@ -3216,12 +3241,27 @@ void settings_info_update()
   if (crash_count)
     snprintf(diag, sizeof(diag), "\n%u unplanned restart%s%s%s - tap to clear", crash_count, crash_count == 1 ? "" : "s",
              restart_reason[0] ? ", last: " : "", restart_reason);
+  // Wi-Fi outage: live while down; afterwards the last drop's length and
+  // how long ago it ended, so a router reboot can be checked after the fact.
+  char outage[64] = "";
+  char d1[16], d2[16];
+  if (!wifi_signal_ui_connected)
+  {
+    fmt_duration(d1, sizeof(d1), millis() - wifi_down_since_ms);
+    snprintf(outage, sizeof(outage), "Wi-Fi down for %s", d1);
+  }
+  else if (wifi_back_at_ms && !crash_count) // third line is shared with the restart note
+  {
+    fmt_duration(d1, sizeof(d1), wifi_last_outage_ms);
+    fmt_duration(d2, sizeof(d2), millis() - wifi_back_at_ms);
+    snprintf(outage, sizeof(outage), "\nLast Wi-Fi drop: %s, back %s ago", d1, d2);
+  }
   if (wifi_signal_ui_connected)
-    lv_label_set_text_fmt(settings_info_lab, "%s  \xE2\x80\xA2  up %s\n%s  \xE2\x80\xA2  %d dBm  \xE2\x80\xA2  free %uK + %.1fM%s",
-                          fw, upt, WiFi.localIP().toString().c_str(), (int)wifi_signal_rssi_dbm, ram_kb, psram_mb, diag);
+    lv_label_set_text_fmt(settings_info_lab, "%s  \xE2\x80\xA2  up %s\n%s  \xE2\x80\xA2  %d dBm  \xE2\x80\xA2  free %uK + %.1fM%s%s",
+                          fw, upt, WiFi.localIP().toString().c_str(), (int)wifi_signal_rssi_dbm, ram_kb, psram_mb, outage, diag);
   else
-    lv_label_set_text_fmt(settings_info_lab, "%s  \xE2\x80\xA2  up %s\nWi-Fi not connected  \xE2\x80\xA2  free %uK + %.1fM%s",
-                          fw, upt, ram_kb, psram_mb, diag);
+    lv_label_set_text_fmt(settings_info_lab, "%s  \xE2\x80\xA2  up %s\n%s  \xE2\x80\xA2  free %uK + %.1fM%s",
+                          fw, upt, outage, ram_kb, psram_mb, diag);
 
   if (update_btn_lab)
   {
