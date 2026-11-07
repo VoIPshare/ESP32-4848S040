@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.55"
+#define FW_VERSION "3.56"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -154,6 +154,7 @@ void rgb_panel_signal_pause(int pclk_gpio, uint32_t ms);
 void rgb_panel_signals(bool on, int de, int vsync, int hsync, int pclk);
 static volatile bool panel_boot_request = false; // setup page -> loop(): panel_boot_sequence()
 bool rgb_panel_rebuild(Arduino_RGB_Display *gfx, Arduino_ESP32RGBPanel *panel, int16_t w, int16_t h);
+bool rgb_panel_take_rebuild_request(); // the resync timer: a stream restart didn't hold
 static volatile bool panel_rebuild_request = false; // setup page -> loop(): rgb_panel_rebuild()
 #define RGB_PCLK_GPIO 21
 static volatile bool panel_pause_request = false; // setup page -> loop(): rgb_panel_signal_pause()
@@ -4599,10 +4600,15 @@ void loop()
   if (ami_take_status_refresh()) phone_apply_to_ui();
   if (jf_take_ui_refresh()) { home_media_apply(); jf_apply_to_ui(); }
   if (notify_pending) { notify_pending = false; notify_apply_to_ui(); }
+  if (rgb_panel_take_rebuild_request())
+  {
+    Serial.println("[Panel] stream restart didn't hold - rebuilding the display driver");
+    panel_rebuild_request = true;
+  }
   if (panel_rebuild_request)
   {
     panel_rebuild_request = false;
-    Serial.println("[Panel] rebuilding the display driver (setup page)");
+    Serial.println("[Panel] rebuilding the display driver");
     bool ok = rgb_panel_rebuild(gfx, rgbpanel, 480, 480);
     Serial.printf("[Panel] rebuild: %s\n", ok ? "ok" : "FAILED");
     lv_obj_invalidate(lv_scr_act());

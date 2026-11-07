@@ -79,7 +79,19 @@ bool rgb_panel_stream_offset()
 // out of step 3 checks in a row. A real offset stays until it's repaired;
 // a delayed interrupt only skews one measurement - restarting on those (137
 // times in 2 hours) kept disturbing the signal. checks_needed 1: right away.
+//
+// When a restart doesn't hold - the stream is out of step again within
+// REBUILD_WINDOW_US of the last one - the restart isn't enough, so ask
+// loop() for a full driver rebuild (what "Rebuild display driver" on the
+// setup page does, which brought the picture back by hand). At most one
+// per REBUILD_MIN_GAP_US, so a measurement that never settles can't keep
+// blanking the screen.
+#define REBUILD_WINDOW_US (15LL * 1000000LL)
+#define REBUILD_MIN_GAP_US (10LL * 60LL * 1000000LL)
 static uint8_t diag_out_of_step = 0;
+static volatile bool diag_rebuild_wanted = false;
+static volatile uint32_t diag_auto_rebuilds = 0;
+static volatile int64_t diag_last_rebuild_us = 0;
 void rgb_panel_resync_if_needed(Arduino_ESP32RGBPanel *panel, uint8_t checks_needed)
 {
   if (!rgb_panel_stream_offset())
@@ -89,9 +101,26 @@ void rgb_panel_resync_if_needed(Arduino_ESP32RGBPanel *panel, uint8_t checks_nee
   }
   if (++diag_out_of_step < checks_needed) return;
   diag_out_of_step = 0;
+  int64_t now = esp_timer_get_time();
+  if (diag_last_restart_us && now - diag_last_restart_us < REBUILD_WINDOW_US &&
+      (!diag_last_rebuild_us || now - diag_last_rebuild_us > REBUILD_MIN_GAP_US))
+  {
+    diag_last_rebuild_us = now;
+    diag_auto_rebuilds++;
+    diag_rebuild_wanted = true;
+    return;
+  }
   diag_auto_restarts++;
-  diag_last_restart_us = esp_timer_get_time();
+  diag_last_restart_us = now;
   rgb_panel_resync(panel);
+}
+
+// Polled by loop(): true once when the timer above wants a driver rebuild.
+bool rgb_panel_take_rebuild_request()
+{
+  if (!diag_rebuild_wanted) return false;
+  diag_rebuild_wanted = false;
+  return true;
 }
 
 // Detaches (on = false: held low) or gives back (on = true) the panel's
@@ -172,16 +201,18 @@ void rgb_panel_diag(Arduino_ESP32RGBPanel *panel, char *out, size_t n)
   // One line: (480 + porches) pixel clocks; the frame time / 518 lines works for any clock.
   long line_us = v ? 1000000L / (long)v / 518 : 55;
   if (line_us < 1) line_us = 1;
-  char last[40] = "";
+  char last[40] = "", last_rb[40] = "";
   if (diag_last_restart_us)
     snprintf(last, sizeof(last), " (last %lu min ago)", (unsigned long)((esp_timer_get_time() - diag_last_restart_us) / 60000000));
+  if (diag_last_rebuild_us)
+    snprintf(last_rb, sizeof(last_rb), " (last %lu min ago)", (unsigned long)((esp_timer_get_time() - diag_last_rebuild_us) / 60000000));
   snprintf(out, n,
            "VSYNC: %lu/s, frame done: %lu/s\nGap frame done -> VSYNC: %ld us (at boot %ld us, %lu frames)\n"
            "Difference: %ld us = about %ld lines\nStream restart call: %s\nAutomatic restarts since boot: %lu%s\n"
-           "Uptime: %lu min",
+           "Automatic driver rebuilds: %lu%s\nUptime: %lu min",
            (unsigned long)v, (unsigned long)f, gap, ref, (unsigned long)diag_ref_samples, gap - ref, (gap - ref) / line_us,
            r == ESP_OK ? "ESP_OK" : esp_err_to_name(r), (unsigned long)diag_auto_restarts, last,
-           (unsigned long)(esp_timer_get_time() / 60000000));
+           (unsigned long)diag_auto_rebuilds, last_rb, (unsigned long)(esp_timer_get_time() / 60000000));
 }
 
 // The strongest, short of a reboot: deletes the RGB panel driver (frame
