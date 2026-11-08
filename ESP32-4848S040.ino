@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.56"
+#define FW_VERSION "3.57"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -258,6 +258,11 @@ static uint16_t crash_count = 0;
 #define BAMBU_AUTO_SHOW_MS (10UL * 1000UL) // the Bambu screen at a print's start and end, then Home
 static bool bambu_screen_auto_opened = false;
 static uint32_t bambu_auto_return_home_at_ms = 0; // 0 = not scheduled
+// Pinned on the Bambu screen when a print finishes: the pin comes off
+// BAMBU_PIN_RELEASE_MS later and the screen goes Home (clock_tick_cb()).
+// Any pin change by hand, or a new print starting, cancels it.
+#define BAMBU_PIN_RELEASE_MS (2UL * 60UL * 1000UL)
+static uint32_t bambu_pin_release_at_ms = 0; // 0 = not scheduled
 
 // Screen pin: hold the top-left corner 3s to toggle (see pin_hold_event(),
 // pin icon from create_pin_hotspot()). While pinned, swipe navigation, the Home
@@ -550,6 +555,17 @@ void clock_tick_cb(lv_timer_t *timer)
     bambu_auto_return_home_at_ms = 0;
     bambu_screen_auto_opened = false;
     if (current_screen == 1 && !in_settings) go_to_screen_blackout(0);
+  }
+
+  // Pinned on Bambu and the print finished a while ago: unpin, back Home.
+  if (bambu_pin_release_at_ms != 0 && millis() >= bambu_pin_release_at_ms)
+  {
+    bambu_pin_release_at_ms = 0;
+    if (screen_pinned && current_screen == 1)
+    {
+      pin_set(false);
+      if (!in_settings) go_to_screen_blackout(0);
+    }
   }
 }
 
@@ -952,6 +968,7 @@ void create_nav_menu()
 void pin_set(bool on)
 {
   screen_pinned = on;
+  bambu_pin_release_at_ms = 0;
   if (pin_indicator) (on ? lv_obj_clear_flag : lv_obj_add_flag)(pin_indicator, LV_OBJ_FLAG_HIDDEN);
 }
 

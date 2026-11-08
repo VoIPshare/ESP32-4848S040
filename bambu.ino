@@ -288,6 +288,7 @@ void bambu_apply_to_ui()
     jf_notify(tr(S_PRINT_FINISHED), text);
     bambu_finish_badge_until_ms = millis() + BAMBU_FINISH_BADGE_MS;
     start_finish_screen_flash();
+    if (screen_pinned && current_screen == 1) bambu_pin_release_at_ms = millis() + BAMBU_PIN_RELEASE_MS;
     // The Bambu screen for BAMBU_AUTO_SHOW_MS at the end too (setting-gated),
     // then Home.
     if (settings.auto_show_bambu_on_start && !in_settings && !screen_pinned)
@@ -307,6 +308,7 @@ void bambu_apply_to_ui()
   // after a reboot, since bambu_prev_gcode_state starts empty either way).
   // Suppressed while screen_pinned, same as every other auto-navigate.
   bool now_printing_ish = strcmp(bambu.gcode_state, "RUNNING") == 0 || strcmp(bambu.gcode_state, "PREPARE") == 0;
+  if (now_printing_ish) bambu_pin_release_at_ms = 0; // a new print: keep the pin
   if (!was_printing_ish && now_printing_ish && bambu.percent < 1)
   {
     bambu_print_started = time(nullptr);
