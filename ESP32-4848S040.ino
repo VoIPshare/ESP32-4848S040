@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.57"
+#define FW_VERSION "3.58"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -154,7 +154,8 @@ void rgb_panel_signal_pause(int pclk_gpio, uint32_t ms);
 void rgb_panel_signals(bool on, int de, int vsync, int hsync, int pclk);
 static volatile bool panel_boot_request = false; // setup page -> loop(): panel_boot_sequence()
 bool rgb_panel_rebuild(Arduino_RGB_Display *gfx, Arduino_ESP32RGBPanel *panel, int16_t w, int16_t h);
-bool rgb_panel_take_rebuild_request(); // the resync timer: a stream restart didn't hold
+bool rgb_panel_take_rebuild_request();
+void rgb_panel_note_manual_rebuild(); // the resync timer: a stream restart didn't hold
 static volatile bool panel_rebuild_request = false; // setup page -> loop(): rgb_panel_rebuild()
 #define RGB_PCLK_GPIO 21
 static volatile bool panel_pause_request = false; // setup page -> loop(): rgb_panel_signal_pause()
@@ -258,11 +259,15 @@ static uint16_t crash_count = 0;
 #define BAMBU_AUTO_SHOW_MS (10UL * 1000UL) // the Bambu screen at a print's start and end, then Home
 static bool bambu_screen_auto_opened = false;
 static uint32_t bambu_auto_return_home_at_ms = 0; // 0 = not scheduled
-// Pinned on the Bambu screen when a print finishes: the pin comes off
+// Pinned on the Bambu screen while a print runs: once the printer stops
+// printing (finished, failed, idle or offline) the pin comes off
 // BAMBU_PIN_RELEASE_MS later and the screen goes Home (clock_tick_cb()).
-// Any pin change by hand, or a new print starting, cancels it.
+// Checked every second from the current state, not from catching the
+// RUNNING->FINISH transition, so a missed MQTT message can't block it.
+// Any pin change by hand, or the print resuming, cancels it.
 #define BAMBU_PIN_RELEASE_MS (2UL * 60UL * 1000UL)
 static uint32_t bambu_pin_release_at_ms = 0; // 0 = not scheduled
+static bool bambu_pin_saw_print = false;     // pinned on Bambu while it printed
 
 // Screen pin: hold the top-left corner 3s to toggle (see pin_hold_event(),
 // pin icon from create_pin_hotspot()). While pinned, swipe navigation, the Home
@@ -558,7 +563,27 @@ void clock_tick_cb(lv_timer_t *timer)
   }
 
   // Pinned on Bambu and the print finished a while ago: unpin, back Home.
-  if (bambu_pin_release_at_ms != 0 && millis() >= bambu_pin_release_at_ms)
+  if (screen_pinned && current_screen == 1)
+  {
+    bool printing = bambu_is_printing();
+    if (printing)
+    {
+      bambu_pin_saw_print = true;
+      bambu_pin_release_at_ms = 0;
+    }
+    else if (bambu_pin_saw_print && bambu_pin_release_at_ms == 0)
+    {
+      bambu_pin_release_at_ms = millis() + BAMBU_PIN_RELEASE_MS;
+      if (!bambu_pin_release_at_ms) bambu_pin_release_at_ms = 1;
+      Serial.printf("[Pin] print over - unpinning in %lus\n", BAMBU_PIN_RELEASE_MS / 1000UL);
+    }
+  }
+  else
+  {
+    bambu_pin_saw_print = false;
+    bambu_pin_release_at_ms = 0;
+  }
+  if (bambu_pin_release_at_ms != 0 && (int32_t)(millis() - bambu_pin_release_at_ms) >= 0)
   {
     bambu_pin_release_at_ms = 0;
     if (screen_pinned && current_screen == 1)
@@ -969,6 +994,7 @@ void pin_set(bool on)
 {
   screen_pinned = on;
   bambu_pin_release_at_ms = 0;
+  bambu_pin_saw_print = false;
   if (pin_indicator) (on ? lv_obj_clear_flag : lv_obj_add_flag)(pin_indicator, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -2641,7 +2667,8 @@ void handle_panel()
   }
   else if (what == "rebuild")
   {
-    panel_rebuild_request = true; // loop(): rgb_panel_rebuild()
+    rgb_panel_note_manual_rebuild(); // rgb_resync.cpp: for Display diagnostics
+    panel_rebuild_request = true;    // loop(): rgb_panel_rebuild()
     config_server.send(200, "text/plain", "Display driver rebuilt (as at boot). Is the picture back in place?");
   }
   else if (what == "boot")
@@ -2661,7 +2688,7 @@ void handle_panel()
   }
   else if (what == "info")
   {
-    char txt[320];
+    char txt[448];
     rgb_panel_diag(rgbpanel, txt, sizeof(txt));
     Serial.printf("[Panel] %s\n", txt);
     config_server.send(200, "text/plain", txt);
@@ -4619,7 +4646,7 @@ void loop()
   if (notify_pending) { notify_pending = false; notify_apply_to_ui(); }
   if (rgb_panel_take_rebuild_request())
   {
-    Serial.println("[Panel] stream restart didn't hold - rebuilding the display driver");
+    Serial.println("[Panel] stream out of step - rebuilding the display driver");
     panel_rebuild_request = true;
   }
   if (panel_rebuild_request)
