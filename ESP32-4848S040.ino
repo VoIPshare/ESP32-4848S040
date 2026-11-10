@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.61"
+#define FW_VERSION "3.62"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -1679,6 +1679,14 @@ static void pg_flush()
   if (page_buf.length()) config_server.sendContent(page_buf);
   page_buf = "";
 }
+// Pin from the web (GET /pin?screen=bambu, /pin?off): applied by loop() on
+// the LVGL thread - see pin_web_apply(). -2 none, -1 unpin, else a screen.
+static volatile int pin_web_req = -2;
+static const char *const PIN_SCREEN_KEYS[] = {"home", "bambu", "calendar", "proxmox", "stocks", "makerworld",
+                                              "packages", "flight", "homeassistant", "phone", "jellyfin"};
+static const char *const PIN_SCREEN_NAMES[] = {"Home", "Bambu printer", "Calendar", "Proxmox", "Stocks", "MakerWorld",
+                                               "Packages", "Flight", "Home Assistant", "Phone", "Jellyfin"};
+
 static void pg(const String &s) { page_buf += s; if (page_buf.length() > 1800) pg_flush(); }
 static void pg(const char *s) { page_buf += s; if (page_buf.length() > 1800) pg_flush(); }
 static void pg(const __FlashStringHelper *s) { page_buf += s; if (page_buf.length() > 1800) pg_flush(); }
@@ -1930,6 +1938,20 @@ void send_settings_page()
     page_switch("A pinned screen stays on at night", "pinawake", settings.pin_keeps_awake);
     page_hint(F("At night the screen dims after 30 s without a touch; a touch brings it back. "
                 "With \"A pinned screen stays on\", a pinned screen keeps its normal brightness until the pin comes off."));
+    pg(F("<label>Pin a screen</label><div class='row'><select id='pinscr'>"));
+    for (int i = 0; i < SCREEN_COUNT; i++)
+    {
+      if (!screen_available(i)) continue;
+      bool sel = screen_pinned ? i == current_screen : i == 1;
+      pg(String("<option value='") + PIN_SCREEN_KEYS[i] + "'" + (sel ? " selected" : "") + ">" + PIN_SCREEN_NAMES[i] + "</option>");
+    }
+    pg(F("</select><button class='btn pri' type='button' onclick=\"fetch('/pin?screen='+document.getElementById('pinscr').value)"
+         ".then(r=>r.text()).then(alert)\">Pin</button>"
+         "<button class='btn' type='button' onclick=\"fetch('/pin?off').then(r=>r.text()).then(alert)\">Unpin</button></div>"));
+    pg(String("<p class='hint'>") + (screen_pinned ? String("Pinned now: ") + PIN_SCREEN_NAMES[current_screen < SCREEN_COUNT ? current_screen : 0]
+                                                   : String("Nothing pinned now.")) +
+       " Shows that screen on the display and keeps it there, like holding the top-left corner 3 s. "
+       "Also as a link: /pin?screen=bambu or /pin?off.</p>");
     page_section_end();
   }
 
@@ -2670,6 +2692,63 @@ void handle_reboot()
 // to tell which part lost sync. "stream": restart the RGB DMA (the same as
 // rgb_resync_timer_cb()); "init": re-send the ST7701 setup over its SPI pins
 // (separate from the RGB pins, so it can run while the picture streams).
+// GET /pin?screen=<key> pins that screen (shown first), /pin?off unpins.
+void handle_pin()
+{
+  if (!web_auth()) return;
+  if (config_server.hasArg("off"))
+  {
+    pin_web_req = -1;
+    config_server.send(200, "text/plain", "Unpinned.");
+    return;
+  }
+  String want = config_server.arg("screen");
+  for (int i = 0; i < SCREEN_COUNT; i++)
+  {
+    if (!want.equalsIgnoreCase(PIN_SCREEN_KEYS[i])) continue;
+    if (!screen_available(i))
+    {
+      config_server.send(400, "text/plain", String(PIN_SCREEN_NAMES[i]) + " isn't set up, so it can't be pinned.");
+      return;
+    }
+    pin_web_req = i;
+    config_server.send(200, "text/plain", String("Pinned: ") + PIN_SCREEN_NAMES[i]);
+    return;
+  }
+  String list;
+  for (int i = 0; i < SCREEN_COUNT; i++) list += String(i ? ", " : "") + PIN_SCREEN_KEYS[i];
+  config_server.send(400, "text/plain", "/pin?screen=<one of: " + list + "> or /pin?off");
+}
+
+// loop() side of handle_pin(): out of any overlay, to that screen, pinned.
+void pin_web_apply(int p)
+{
+  last_activity_ms = millis();
+  dim_forced = false;
+  if (p < 0)
+  {
+    pin_set(false);
+    Serial.println("[Pin] off (web)");
+    backlight_update();
+    return;
+  }
+  quick_panel_hide();
+  nav_menu_hide();
+  flight_alert_cancel();
+  if (in_settings) close_settings_screen();
+  if (in_subscreen)
+  {
+    in_subscreen = false;
+    if (page_dots_row) lv_obj_clear_flag(page_dots_row, LV_OBJ_FLAG_HIDDEN);
+  }
+  bambu_screen_auto_opened = false;
+  bambu_auto_return_home_at_ms = 0;
+  if (p != current_screen) go_to_screen_blackout(p);
+  pin_set(true);
+  Serial.printf("[Pin] %s (web)\n", PIN_SCREEN_KEYS[p]);
+  backlight_update();
+}
+
 void handle_panel()
 {
   if (!web_auth()) return;
@@ -2780,6 +2859,7 @@ void start_config_server()
   config_server.on("/ghinstall", HTTP_POST, handle_gh_install);
   config_server.on("/firmware.bin", HTTP_GET, handle_firmware_download);
   config_server.on("/panel", HTTP_GET, handle_panel);
+  config_server.on("/pin", HTTP_GET, handle_pin);
   config_server.on("/reboot", HTTP_POST, handle_reboot);
   config_server.on("/scan", handle_scan);
   config_server.on("/save", HTTP_POST, handle_save_post);
@@ -4719,6 +4799,12 @@ void loop()
     bool ok = rgb_panel_full_reset(rgbpanel);
     Serial.printf("[Panel] display controller reset (setup page): %s\n", ok ? "ok" : "FAILED");
     lv_obj_invalidate(lv_scr_act()); // redraw everything
+  }
+  if (pin_web_req != -2)
+  {
+    int p = pin_web_req;
+    pin_web_req = -2;
+    pin_web_apply(p);
   }
   if (shot_page_req >= 0)
   {
