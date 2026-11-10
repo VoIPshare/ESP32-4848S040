@@ -60,7 +60,7 @@ void screensaver_update()
 {
   if (!saver) return;
   bool want = settings.night_clock && settings.night_level > 0 && !ota_in_progress &&
-              (dim_forced || (night_now() && millis() - last_activity_ms > NIGHT_DIM_IDLE_MS));
+              (dim_forced || night_dim_active());
   if (want && !screensaver_visible())
   {
     screensaver_draw();

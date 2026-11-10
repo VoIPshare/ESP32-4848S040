@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.60"
+#define FW_VERSION "3.61"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -433,6 +433,7 @@ struct DeviceSettings
   uint8_t night_level = 10;
   uint8_t day_level = 100; // normal brightness, %
   bool night_clock = true;  // dimmed at night: big clock instead of the dashboard (screensaver.ino)
+  bool pin_keeps_awake = false; // a pinned screen isn't dimmed at night (night_dim_active())
   // GitHub release updates (see gh_update_maintain()): UPDATE_NOTIFY shows
   // an icon on Home to accept/skip, UPDATE_AUTO installs by itself,
   // UPDATE_OFF never checks on its own (the Settings button still works).
@@ -666,10 +667,19 @@ bool night_now()
   return s < e ? (t >= s && t < e) : (t >= s || t < e); // e.g. 23:30 -> 7:00 wraps past midnight
 }
 
+// Night hours and no touch for NIGHT_DIM_IDLE_MS - unless a screen is pinned
+// and settings.pin_keeps_awake is on. Once the pin comes off (by hand or the
+// Bambu auto-release), the night dimming is back by itself.
+bool night_dim_active()
+{
+  if (settings.pin_keeps_awake && screen_pinned) return false;
+  return night_now() && millis() - last_activity_ms > NIGHT_DIM_IDLE_MS;
+}
+
 // Once a second from clock_tick_cb(), and right away on a touch.
 void backlight_update()
 {
-  bool dim = dim_forced || (night_now() && millis() - last_activity_ms > NIGHT_DIM_IDLE_MS);
+  bool dim = dim_forced || night_dim_active();
   static bool was_dim = false;
   if (dim != was_dim)
   {
@@ -1550,6 +1560,7 @@ void load_settings()
   settings.night_level = prefs.getUChar("nlevel", settings.night_level);
   settings.day_level = prefs.getUChar("dlevel", settings.day_level);
   settings.night_clock = prefs.getBool("nclock", settings.night_clock);
+  settings.pin_keeps_awake = prefs.getBool("pinawake", settings.pin_keeps_awake);
   settings.update_mode = prefs.getUChar("updmode", settings.update_mode);
   settings.lang = prefs.getUChar("lang", settings.lang);
   settings.shot_open = prefs.getBool("shotopen", settings.shot_open);
@@ -1605,6 +1616,7 @@ void save_settings()
   prefs.putUChar("nlevel", settings.night_level);
   prefs.putUChar("dlevel", settings.day_level);
   prefs.putBool("nclock", settings.night_clock);
+  prefs.putBool("pinawake", settings.pin_keeps_awake);
   prefs.putUChar("updmode", settings.update_mode);
   prefs.putUChar("lang", settings.lang);
   prefs.putBool("shotopen", settings.shot_open);
@@ -1915,7 +1927,9 @@ void send_settings_page()
     pg(F("</div>"));
     page_text("Night brightness (%, 0 = screen off)", "nlevel", String(settings.night_level), "", "number", "min='0' max='100'");
     page_switch("Big clock instead of the dashboard while dimmed", "nclock", settings.night_clock);
-    page_hint(F("At night the screen dims after 30 s without a touch; a touch brings it back."));
+    page_switch("A pinned screen stays on at night", "pinawake", settings.pin_keeps_awake);
+    page_hint(F("At night the screen dims after 30 s without a touch; a touch brings it back. "
+                "With \"A pinned screen stays on\", a pinned screen keeps its normal brightness until the pin comes off."));
     page_section_end();
   }
 
@@ -2214,6 +2228,7 @@ void handle_save_post()
   {
     settings.night_dim = config_server.hasArg("ndim");
     settings.night_clock = config_server.hasArg("nclock");
+    settings.pin_keeps_awake = config_server.hasArg("pinawake");
   }
   // Night schedule: "HH:MM" (a bare hour still works).
   struct { const char *arg; uint8_t *h, *m; } times[] = {{"nstart", &settings.night_start, &settings.night_start_min},
