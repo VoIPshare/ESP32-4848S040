@@ -6,7 +6,7 @@
 
 // Shown in the Serial log at boot; .github/workflows/compile.yml tags each
 // release with it, so bump it with every firmware change.
-#define FW_VERSION "3.58"
+#define FW_VERSION "3.60"
 
 // The ESP32-4848S040's RGB panel driver and PSRAM layout only exist on the
 // ESP32-S3: fail early with a clear message instead of deep in Arduino_GFX.
@@ -154,9 +154,20 @@ void rgb_panel_signal_pause(int pclk_gpio, uint32_t ms);
 void rgb_panel_signals(bool on, int de, int vsync, int hsync, int pclk);
 static volatile bool panel_boot_request = false; // setup page -> loop(): panel_boot_sequence()
 bool rgb_panel_rebuild(Arduino_RGB_Display *gfx, Arduino_ESP32RGBPanel *panel, int16_t w, int16_t h);
+void rgb_panel_after_flash_write(Arduino_ESP32RGBPanel *panel);
+// Right after every NVS write (settings, print history, MakerWorld day
+// base): a flash write stalls the panel's refill interrupt and can leave the
+// picture shifted - see rgb_resync.cpp. Safe before the display is up.
+void panel_after_flash_write() { rgb_panel_after_flash_write(rgbpanel); }
 bool rgb_panel_take_rebuild_request();
 void rgb_panel_note_manual_rebuild(); // the resync timer: a stream restart didn't hold
 static volatile bool panel_rebuild_request = false; // setup page -> loop(): rgb_panel_rebuild()
+// The panel can show the picture shifted while the stream measures in step
+// (Display diagnostics: ~0 lines), so the detector can't see it - only a
+// driver rebuild fixes it. One is done hidden behind the black of a screen
+// change, at most once per PANEL_PREVENTIVE_REBUILD_MS (go_to_screen_blackout()).
+#define PANEL_PREVENTIVE_REBUILD_MS (60UL * 60UL * 1000UL)
+static uint32_t panel_last_rebuild_ms = 0;
 #define RGB_PCLK_GPIO 21
 static volatile bool panel_pause_request = false; // setup page -> loop(): rgb_panel_signal_pause()
 // Set by the setup page, done by loop() (not mid-draw): rgb_panel_full_reset().
@@ -809,6 +820,13 @@ void go_to_screen_blackout(uint8_t target)
 {
   pending_screen = target;
   lv_obj_clear_flag(blackout_overlay, LV_OBJ_FLAG_HIDDEN);
+  // loop() rebuilds before the reveal timer below fires, so only the black
+  // overlay is on screen while it happens.
+  if (!ota_in_progress && millis() - panel_last_rebuild_ms >= PANEL_PREVENTIVE_REBUILD_MS)
+  {
+    Serial.println("[Panel] hourly rebuild behind a screen change");
+    panel_rebuild_request = true;
+  }
   lv_timer_t *t = lv_timer_create(blackout_reveal_cb, 100, NULL);
   lv_timer_set_repeat_count(t, 1);
 }
@@ -1606,6 +1624,7 @@ void save_settings()
   prefs.putBool("jfpop", settings.jf_popups);
   prefs.putString("jfmute", settings.jf_mute);
   prefs.end();
+  panel_after_flash_write();
 }
 
 // ==================== Wi-Fi setup portal (served while the AP is on) ====================
@@ -2688,7 +2707,7 @@ void handle_panel()
   }
   else if (what == "info")
   {
-    char txt[448];
+    char txt[576];
     rgb_panel_diag(rgbpanel, txt, sizeof(txt));
     Serial.printf("[Panel] %s\n", txt);
     config_server.send(200, "text/plain", txt);
@@ -2994,6 +3013,7 @@ void ap_password_init()
     if (radio_off) bootloader_random_disable();
     ap_password[8] = '\0';
     prefs.putString("appass", ap_password);
+    panel_after_flash_write();
   }
   prefs.end();
 }
@@ -4344,6 +4364,11 @@ void setup()
   Serial.begin(115200);
   delay(500);
   Serial.println("\n\n=== Dashboard starting (firmware " FW_VERSION ") ===");
+  // The Wi-Fi driver would otherwise save its config to NVS on every
+  // connect/reconnect - a flash write each time, which stalls the RGB
+  // panel's refill interrupt (see rgb_resync.cpp). The credentials come
+  // from settings anyway. Must come before the first WiFi.mode()/softAP().
+  WiFi.persistent(false);
   restart_reason_init();
   tls_memory_to_psram();
 
@@ -4654,6 +4679,7 @@ void loop()
     panel_rebuild_request = false;
     Serial.println("[Panel] rebuilding the display driver");
     bool ok = rgb_panel_rebuild(gfx, rgbpanel, 480, 480);
+    panel_last_rebuild_ms = millis();
     Serial.printf("[Panel] rebuild: %s\n", ok ? "ok" : "FAILED");
     lv_obj_invalidate(lv_scr_act());
     lv_obj_invalidate(lv_layer_top());

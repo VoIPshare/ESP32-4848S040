@@ -60,6 +60,7 @@ void ph_record(const char *name, bool ok)
   {
     p.putBytes("list", ph, sizeof(ph));
     p.end();
+    panel_after_flash_write();
   }
 }
 

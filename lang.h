@@ -35,6 +35,7 @@ enum LangKey
   S_INCOMING_CALL,
   S_UP_NEXT, S_DONE, S_NOW, S_IN_MIN, S_IN_H, S_IN_H_MIN, S_IN_DAYS, S_MIN_LEFT,
   S_LOADING, S_LOAD_FAILED, S_NO_EVENTS_MONTH, S_NOTHING_WEEK, S_PRINTER_PROBLEM, S_PRINT_STARTED,
+  S_FIX_DISPLAY,
   S_COUNT
 };
 
@@ -118,6 +119,7 @@ static const char *const LANG_STR[S_COUNT][LANG_COUNT] = {
     {"Nothing scheduled this week", "Niente in programma questa settimana", "Rien de pr\xC3\xA9vu cette semaine"},
     {"Printer problem", "Problema stampante", "Probl\xC3\xA8me d'imprimante"},
     {"Print started", "Stampa iniziata", "Impression lanc\xC3\xA9" "e"},
+    {"Fix display", "Ripara schermo", "R\xC3\xA9parer l'\xC3\xA9" "cran"},
 };
 
 static inline const char *tr(LangKey k) { return LANG_STR[k][ui_lang < LANG_COUNT ? ui_lang : 0]; }

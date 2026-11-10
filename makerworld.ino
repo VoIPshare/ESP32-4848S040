@@ -87,6 +87,7 @@ void makerworld_update_today()
       p.putInt("day", day);
       p.putBytes("base", base, sizeof(base));
       p.end();
+      panel_after_flash_write();
     }
   }
   for (int i = 0; i < MW_COUNTER_COUNT; i++)

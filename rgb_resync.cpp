@@ -64,13 +64,43 @@ static volatile int64_t diag_fb_done_us = 0, diag_gap_us = 0, diag_ref_gap_us = 
 static volatile uint32_t diag_ref_samples = 0;
 static volatile uint32_t diag_auto_restarts = 0;
 static volatile int64_t diag_last_restart_us = 0;
+// The reference is the average gap over this window: 3..10 s after boot, and
+// again 3..10 s after each driver rebuild (the stream starts from scratch
+// then, so a reference taken under boot-time load doesn't stick for the
+// whole uptime).
+static volatile int64_t diag_ref_start_us = 3000000, diag_ref_end_us = 10000000;
+
+// ---- Flash writes ----
+// The Arduino core's RGB LCD interrupt isn't IRAM-safe
+// (CONFIG_LCD_RGB_ISR_IRAM_SAFE is off in the precompiled SDK). While an
+// NVS write or erase has the flash cache disabled, the bounce-buffer refill
+// can't run: the DMA keeps clocking the two stale buffers, the sync
+// generator counts on, and the picture comes back shifted by a multiple of
+// the bounce buffer. Called right after every flash write (settings, print
+// history, MakerWorld day base): restart the stream at the next VSYNC -
+// nothing changes on screen if it's still aligned - and for a while let the
+// detector act on 2 out-of-step checks instead of 3 and rebuild at once,
+// without waiting out REBUILD_MIN_GAP_US, if the restart didn't hold.
+#define FLASH_WRITE_WINDOW_US (15LL * 1000000LL)
+static volatile int64_t diag_flash_write_us = 0;
+static volatile uint32_t diag_flash_writes = 0;
+void rgb_panel_after_flash_write(Arduino_ESP32RGBPanel *panel)
+{
+  diag_flash_write_us = esp_timer_get_time();
+  diag_flash_writes++;
+  rgb_panel_resync(panel);
+}
+static bool rgb_panel_flash_write_recent()
+{
+  return diag_flash_write_us && esp_timer_get_time() - diag_flash_write_us < FLASH_WRITE_WINDOW_US;
+}
 
 // True once the boot reference is in and the stream is more than 5 lines
 // (~55 us each) away from it - then a restart is worth doing; otherwise
 // leave the stream alone (a restart briefly disturbs the signal).
 bool rgb_panel_stream_offset()
 {
-  if (diag_ref_samples < 50 || esp_timer_get_time() < 10000000) return false;
+  if (diag_ref_samples < 50 || esp_timer_get_time() < diag_ref_end_us) return false;
   int64_t d = diag_gap_us - diag_ref_gap_us;
   return d > 5 * 70 || d < -5 * 70; // 5 lines (a line is ~55 us at 10 MHz, ~70 us at 8 MHz)
 }
@@ -96,14 +126,17 @@ void rgb_panel_resync_if_needed(Arduino_ESP32RGBPanel *panel, uint8_t checks_nee
     diag_out_of_step = 0;
     return;
   }
+  bool after_flash = rgb_panel_flash_write_recent();
+  if (after_flash && checks_needed > 2) checks_needed = 2;
   if (++diag_out_of_step < checks_needed) return;
   diag_out_of_step = 0;
   int64_t now = esp_timer_get_time();
   // A stream restart can bring the timing back in step while the picture
   // stays shifted (seen on the Bambu screen: only "Rebuild display driver"
   // fixed it), so go straight to the rebuild when one is allowed; plain
-  // restarts only in between.
-  if (!diag_last_rebuild_us || now - diag_last_rebuild_us > REBUILD_MIN_GAP_US)
+  // restarts only in between. Right after a flash write the cause is known,
+  // so the rebuild is allowed regardless of the gap.
+  if (after_flash || !diag_last_rebuild_us || now - diag_last_rebuild_us > REBUILD_MIN_GAP_US)
   {
     diag_last_rebuild_us = now;
     diag_auto_rebuilds++;
@@ -174,7 +207,7 @@ static bool IRAM_ATTR diag_on_vsync(esp_lcd_panel_handle_t, const esp_lcd_rgb_pa
     int64_t gap = now - diag_fb_done_us;
     diag_gap_us = gap;
     // Reference: average of the frames between 3 and 10 s after boot.
-    if (now > 3000000 && now < 10000000)
+    if (now > diag_ref_start_us && now < diag_ref_end_us)
     {
       diag_ref_gap_us = (diag_ref_gap_us * diag_ref_samples + gap) / (diag_ref_samples + 1);
       diag_ref_samples++;
@@ -213,7 +246,9 @@ void rgb_panel_diag(Arduino_ESP32RGBPanel *panel, char *out, size_t n)
   // One line: (480 + porches) pixel clocks; the frame time / 518 lines works for any clock.
   long line_us = v ? 1000000L / (long)v / 518 : 55;
   if (line_us < 1) line_us = 1;
-  char last[40] = "", last_rb[40] = "";
+  char last[40] = "", last_rb[40] = "", last_fl[40] = "";
+  if (diag_flash_write_us)
+    snprintf(last_fl, sizeof(last_fl), " (last %lu min ago)", (unsigned long)((esp_timer_get_time() - diag_flash_write_us) / 60000000));
   if (diag_last_restart_us)
     snprintf(last, sizeof(last), " (last %lu min ago)", (unsigned long)((esp_timer_get_time() - diag_last_restart_us) / 60000000));
   if (diag_last_rebuild_us)
@@ -224,12 +259,13 @@ void rgb_panel_diag(Arduino_ESP32RGBPanel *panel, char *out, size_t n)
              (unsigned long)((esp_timer_get_time() - man_rb_us) / 60000000), (unsigned long)man_rb_count,
              (long)man_rb_diff_us, (unsigned long)man_rb_restarts);
   snprintf(out, n,
-           "VSYNC: %lu/s, frame done: %lu/s\nGap frame done -> VSYNC: %ld us (at boot %ld us, %lu frames)\n"
+           "VSYNC: %lu/s, frame done: %lu/s\nGap frame done -> VSYNC: %ld us (reference %ld us, %lu frames)\n"
            "Difference: %ld us = about %ld lines\nStream restart call: %s\nAutomatic restarts since boot: %lu%s\n"
-           "Automatic driver rebuilds: %lu%s\nUptime: %lu min%s",
+           "Automatic driver rebuilds: %lu%s\nFlash writes (stream restarted after each): %lu%s\nUptime: %lu min%s",
            (unsigned long)v, (unsigned long)f, gap, ref, (unsigned long)diag_ref_samples, gap - ref, (gap - ref) / line_us,
            r == ESP_OK ? "ESP_OK" : esp_err_to_name(r), (unsigned long)diag_auto_restarts, last,
-           (unsigned long)diag_auto_rebuilds, last_rb, (unsigned long)(esp_timer_get_time() / 60000000), man);
+           (unsigned long)diag_auto_rebuilds, last_rb, (unsigned long)diag_flash_writes, last_fl,
+           (unsigned long)(esp_timer_get_time() / 60000000), man);
 }
 
 // The strongest, short of a reboot: deletes the RGB panel driver (frame
@@ -249,6 +285,15 @@ bool rgb_panel_rebuild(Arduino_RGB_Display *gfx, Arduino_ESP32RGBPanel *panel, i
   uint16_t *fb = panel->getFrameBuffer(w, h);
   if (!fb) return false;
   gfx->*private_member(RgbDisplayFramebuffer()) = fb;
+  // New stream, new reference: sample it again 3..10 s from now, and leave
+  // the detector quiet until then (rgb_panel_stream_offset()).
+  int64_t now = esp_timer_get_time();
+  diag_ref_samples = 0;
+  diag_ref_gap_us = 0;
+  diag_fb_done_us = 0;
+  diag_out_of_step = 0;
+  diag_ref_start_us = now + 3000000;
+  diag_ref_end_us = now + 10000000;
   rgb_panel_diag_start(panel);
   return true;
 }

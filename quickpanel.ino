@@ -1,6 +1,6 @@
 // ==================== Quick panel ====================
 // Swipe down from the top edge (see my_touchpad_read()): brightness, pin,
-// "dim now", Settings, and the Wi-Fi details. Closes on a tap outside it
+// "dim now", Settings, "fix display", and the Wi-Fi details. Closes on a tap outside it
 // or after QP_SHOW_MS. Opaque, only shown/hidden (no fades - see
 // blackout_overlay).
 
@@ -92,6 +92,16 @@ void qp_settings_cb(lv_event_t *e)
   open_settings_cb(NULL);
 }
 
+// The display driver rebuilt (as "Rebuild display driver" on the setup page):
+// for a shifted picture the board can't detect itself.
+void qp_fix_display_cb(lv_event_t *e)
+{
+  quick_panel_hide();
+  Serial.println("[Panel] rebuild from the quick panel");
+  rgb_panel_note_manual_rebuild();
+  panel_rebuild_request = true; // loop(): rgb_panel_rebuild()
+}
+
 static lv_obj_t *qp_button(lv_obj_t *parent, const char *text, lv_event_cb_t cb, lv_obj_t **label_out)
 {
   lv_obj_t *btn = lv_btn_create(parent);
@@ -120,7 +130,7 @@ void create_quick_panel()
   lv_obj_add_flag(qp_backdrop, LV_OBJ_FLAG_HIDDEN);
 
   lv_obj_t *card = lv_obj_create(qp_backdrop);
-  lv_obj_set_size(card, 448, 236);
+  lv_obj_set_size(card, 448, 300);
   lv_obj_align(card, LV_ALIGN_TOP_MID, 0, 8);
   lv_obj_set_style_bg_color(card, lv_color_hex(0x10181F), LV_PART_MAIN);
   lv_obj_set_style_border_color(card, lv_color_hex(0x34424F), LV_PART_MAIN);
@@ -157,6 +167,10 @@ void create_quick_panel()
   lv_obj_align(dim_btn, LV_ALIGN_TOP_MID, 0, 54);
   lv_obj_t *set_btn = qp_button(card, tr(S_SETTINGS), qp_settings_cb, NULL);
   lv_obj_align(set_btn, LV_ALIGN_TOP_RIGHT, 0, 54);
+  lv_obj_t *fix_btn = qp_button(card, LV_SYMBOL_REFRESH "  ", qp_fix_display_cb, NULL);
+  lv_obj_set_width(fix_btn, 200);
+  lv_label_set_text_fmt(lv_obj_get_child(fix_btn, 0), LV_SYMBOL_REFRESH "  %s", tr(S_FIX_DISPLAY));
+  lv_obj_align(fix_btn, LV_ALIGN_TOP_LEFT, 0, 118);
 
   // Wi-Fi details.
   qp_wifi_lab = lv_label_create(card);
@@ -164,7 +178,7 @@ void create_quick_panel()
   lv_label_set_long_mode(qp_wifi_lab, LV_LABEL_LONG_DOT);
   lv_obj_set_style_text_color(qp_wifi_lab, COLOR_TEXT_MUTED, LV_PART_MAIN);
   lv_obj_set_style_text_font(qp_wifi_lab, &lv_font_ui_14, LV_PART_MAIN);
-  lv_obj_align(qp_wifi_lab, LV_ALIGN_TOP_LEFT, 0, 132);
+  lv_obj_align(qp_wifi_lab, LV_ALIGN_TOP_LEFT, 0, 196);
 
   lv_obj_t *hint = lv_label_create(card);
   lv_label_set_text(hint, tr(S_SWIPE_HINT));
